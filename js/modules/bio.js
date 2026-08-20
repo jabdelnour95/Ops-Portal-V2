@@ -1,6 +1,6 @@
 import { state } from './state.js';
 import { show } from './navigation.js';
-import { photoUploadWidget } from './photos.js';
+import { photoUploadWidget, uploadPhotoGroup, clearPhotoGroup } from './photos.js';
 import { stopRec } from './audio.js';
 
 const API = 'https://tierramor-api.jabdelnour95.workers.dev';
@@ -370,6 +370,7 @@ export async function openBioForm(type, record = null) {
   _activeForm = type;
   _editing = record || null;
   _batchInputRows = [];
+  clearPhotoGroup('bio-photos');
 
   const def = FORMS[type];
   if (!def) return;
@@ -606,7 +607,10 @@ export async function submitBioForm() {
         const supplier = isPurchased ? (document.getElementById('f-supplier')?.value?.trim() || null) : null;
         const cost = isPurchased ? (parseFloat(document.getElementById('f-cost')?.value) || null) : null;
 
-        const entradaFields = { date, raw_material_id, quantity, unit, type, supplier, cost, observations: obs };
+        const newPhotoUrls = await uploadPhotoGroup('bio-photos', 'biofactory', 'entrada', date);
+        const receipt_photo_url = newPhotoUrls[0] || _editing?.receipt_photo_url || null;
+
+        const entradaFields = { date, raw_material_id, quantity, unit, type, supplier, cost, observations: obs, receipt_photo_url };
 
         if (_editing) {
           await _api(`/api/bio/raw-material-entries/${_editing.id}`, 'PATCH', { ...entradaFields, performed_by });

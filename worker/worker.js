@@ -997,6 +997,118 @@ async function handleFarmWorkers(request, env, auth) {
   return proxySb(request, res);
 }
 
+// ─── GOOGLE DRIVE (fotos) ───────────────────────────────────────────────────
+
+// Caché del access token de la service account en memoria del Worker
+// (se invalida al redesplegar, igual que cachedJwks).
+let cachedGoogleToken = null;
+
+function base64urlFromBytes(bytes) {
+  let binary = '';
+  bytes.forEach(b => { binary += String.fromCharCode(b); });
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function base64urlFromString(str) {
+  return base64urlFromBytes(new TextEncoder().encode(str));
+}
+
+function pemToArrayBuffer(pem) {
+  const b64 = pem
+    .replace(/-----BEGIN PRIVATE KEY-----/, '')
+    .replace(/-----END PRIVATE KEY-----/, '')
+    .replace(/\s+/g, '');
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+// Obtiene (y cachea) un access token OAuth2 para la service account de Google Drive,
+// firmando un JWT RS256 propio (grant type jwt-bearer) — no hay librería OAuth2 en Workers.
+async function getGoogleAccessToken(env) {
+  const now = Math.floor(Date.now() / 1000);
+  if (cachedGoogleToken && cachedGoogleToken.expires > now + 60) {
+    return cachedGoogleToken.token;
+  }
+
+  const sa = JSON.parse(env.GOOGLE_DRIVE_SERVICE_ACCOUNT);
+  const header = { alg: 'RS256', typ: 'JWT' };
+  const claim = {
+    iss: sa.client_email,
+    scope: 'https://www.googleapis.com/auth/drive',
+    aud: 'https://oauth2.googleapis.com/token',
+    iat: now,
+    exp: now + 3600,
+  };
+  const signingInput = `${base64urlFromString(JSON.stringify(header))}.${base64urlFromString(JSON.stringify(claim))}`;
+
+  const key = await crypto.subtle.importKey(
+    'pkcs8',
+    pemToArrayBuffer(sa.private_key),
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const signature = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, new TextEncoder().encode(signingInput));
+  const assertion = `${signingInput}.${base64urlFromBytes(new Uint8Array(signature))}`;
+
+  const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion,
+    }),
+  });
+  const tokenData = await tokenRes.json();
+  if (!tokenRes.ok) throw new Error(`Google OAuth error: ${JSON.stringify(tokenData)}`);
+
+  cachedGoogleToken = { token: tokenData.access_token, expires: now + tokenData.expires_in };
+  return tokenData.access_token;
+}
+
+// Sube un archivo a Drive vía multipart/related (metadata JSON + bytes del archivo en un solo body).
+async function uploadFileToDrive(env, accessToken, file, fileName) {
+  const metadata = { name: fileName, parents: [env.GOOGLE_DRIVE_FOLDER_ID] };
+  const boundary = `tierramor-${crypto.randomUUID()}`;
+  const encoder = new TextEncoder();
+  const fileBuffer = await file.arrayBuffer();
+
+  const body = new Blob([
+    encoder.encode(
+      `--${boundary}\r\n` +
+      `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+      `${JSON.stringify(metadata)}\r\n` +
+      `--${boundary}\r\n` +
+      `Content-Type: ${file.type || 'application/octet-stream'}\r\n\r\n`,
+    ),
+    fileBuffer,
+    encoder.encode(`\r\n--${boundary}--`),
+  ]);
+
+  // supportsAllDrives=true es obligatorio para escribir en carpetas de una Shared Drive
+  // (la carpeta "Fotos App" vive en una Shared Drive, no en el My Drive de un usuario)
+  const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id&supportsAllDrives=true', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': `multipart/related; boundary=${boundary}` },
+    body,
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`Drive upload error: ${JSON.stringify(data)}`);
+  return data.id;
+}
+
+// Hace público el archivo (cualquiera con el link puede ver) para que la URL sirva directo en el app.
+async function makeDriveFilePublic(accessToken, fileId) {
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions?supportsAllDrives=true`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role: 'reader', type: 'anyone' }),
+  });
+  if (!res.ok) throw new Error(`Drive permission error: ${JSON.stringify(await res.json())}`);
+}
+
 // ─── PHOTOS ────────────────────────────────────────────────────────────────
 
 async function handlePhotos(request, env, auth) {
@@ -1006,23 +1118,24 @@ async function handlePhotos(request, env, auth) {
 
   const formData = await request.formData();
   const file = formData.get('file');
-  if (!file) return errResponse(request, 'VALIDATION_ERROR', 'No se recibió ningún archivo', 400);
+  if (!file || typeof file === 'string') {
+    return errResponse(request, 'VALIDATION_ERROR', 'No se recibió ningún archivo', 400);
+  }
 
-  const department = formData.get('department') ?? 'general';
-  const recordType = formData.get('record_type') ?? 'photo';
-  const recordDate = formData.get('record_date') ?? new Date().toISOString().slice(0, 10);
-  const fileName = `${department}/${recordDate}/${recordType}-${Date.now()}.jpg`;
+  const department = String(formData.get('department') ?? 'general').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const recordType = String(formData.get('record_type') ?? 'photo').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const recordDate = String(formData.get('record_date') ?? new Date().toISOString().slice(0, 10));
+  const ext = (file.name?.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '') || 'jpg';
+  const fileName = `${department}_${recordDate}_${recordType}-${Date.now()}.${ext}`;
 
-  // TODO: implementar upload a Google Drive usando service account
-  // 1. Parsear JSON de env.GOOGLE_DRIVE_SERVICE_ACCOUNT
-  // 2. Firmar JWT RS256 para OAuth2 (Web Crypto subtle.sign con RSASSA-PKCS1-v1_5)
-  // 3. POST a https://oauth2.googleapis.com/token → access_token
-  // 4. POST multipart a https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart
-  //    con parent folder env.GOOGLE_DRIVE_FOLDER_ID
-  // 5. PATCH permisos del archivo a público (anyone, reader)
-  // 6. Retornar { url: "https://drive.google.com/uc?id=..." }
-
-  return errResponse(request, 'NOT_IMPLEMENTED', 'Upload de fotos pendiente (ver TODO en worker.js:handlePhotos)', 501);
+  try {
+    const accessToken = await getGoogleAccessToken(env);
+    const fileId = await uploadFileToDrive(env, accessToken, file, fileName);
+    await makeDriveFilePublic(accessToken, fileId);
+    return okResponse(request, { url: `https://drive.google.com/uc?id=${fileId}`, file_id: fileId, name: fileName });
+  } catch (err) {
+    return errResponse(request, 'DRIVE_UPLOAD_ERROR', `Error al subir foto a Google Drive: ${err.message}`, 502);
+  }
 }
 
 // ─── ROUTER PRINCIPAL ──────────────────────────────────────────────────────

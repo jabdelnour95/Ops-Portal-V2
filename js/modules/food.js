@@ -1,6 +1,6 @@
 import { state } from './state.js';
 import { show } from './navigation.js';
-import { photoUploadWidget } from './photos.js';
+import { photoUploadWidget, uploadPhotoGroup, clearPhotoGroup } from './photos.js';
 import { stopRec } from './audio.js';
 
 const API = 'https://tierramor-api.jabdelnour95.workers.dev';
@@ -895,12 +895,13 @@ function _updateApplyScopeUI() {
 export async function openFoodForm(type, record = null) {
   stopRec();
   _activeForm  = type;
-  _editing     = record ? { id: record.id } : null;
+  _editing     = record ? { id: record.id, photo_urls: record.photo_urls || [] } : null;
   _inputRows   = [];
   _availRows   = [];
   _prepBedRows = [];
   _applyBedRows = [];
   _harvestRows = [];
+  clearPhotoGroup('food-photos');
 
   const def = FORMS[type];
   if (!def) return;
@@ -1045,6 +1046,8 @@ export async function submitFoodForm() {
     const date = document.getElementById('f-fecha')?.value;
     if (!date) throw new Error('Ingresá la fecha.');
     const obs = _buildObs('obs');
+    const newPhotoUrls = await uploadPhotoGroup('food-photos', 'food_production', _activeForm, date);
+    const photo_urls = _editing ? [...(_editing.photo_urls || []), ...newPhotoUrls] : newPhotoUrls;
 
     switch (_activeForm) {
 
@@ -1075,6 +1078,7 @@ export async function submitFoodForm() {
           material_type: material || null,
           quantity_density: density ? parseFloat(density) : null,
           observations: obs,
+          photo_urls,
         };
 
         if (_editing) {
@@ -1101,7 +1105,7 @@ export async function submitFoodForm() {
 
         if (_editing) {
           await _api(`/api/food/bed-preparations/${_editing.id}`, 'PATCH', {
-            date, bed_id: validBeds[0].bed_id, observations: obs, inputs,
+            date, bed_id: validBeds[0].bed_id, observations: obs, inputs, photo_urls,
           });
           okEl.style.display = 'block';
           btn.textContent = 'Guardado ✓';
@@ -1110,7 +1114,7 @@ export async function submitFoodForm() {
             _api('/api/food/bed-preparations', 'POST', {
               date, bed_id: r.bed_id,
               performed_by: userId, created_by: userId,
-              observations: obs, inputs,
+              observations: obs, inputs, photo_urls,
             })
           ));
           okEl.style.display = 'block';
@@ -1142,14 +1146,14 @@ export async function submitFoodForm() {
         if (_editing) {
           await _api(`/api/food/input-applications/${_editing.id}`, 'PATCH', {
             date, area_id, method, total_liquid_quantity: totalLiquid,
-            observations: fullObs, items,
+            observations: fullObs, items, photo_urls,
           });
         } else {
           await _api('/api/food/input-applications', 'POST', {
             date, area_id, method,
             total_liquid_quantity: totalLiquid,
             performed_by: userId, created_by: userId,
-            observations: fullObs, items,
+            observations: fullObs, items, photo_urls,
           });
         }
         okEl.style.display = 'block';
@@ -1175,6 +1179,7 @@ export async function submitFoodForm() {
           maintenance_types: types,
           duration_minutes: parseInt(document.getElementById('f-duration')?.value) || null,
           observations: fullObs,
+          photo_urls,
         };
 
         if (_editing) {
@@ -1230,7 +1235,7 @@ export async function submitFoodForm() {
           const r = validRows[0];
           await _api(`/api/food/harvests/${_editing.id}`, 'PATCH', {
             date, crop_id: r.crop_id, area_id: r.area_id, bed_id: r.bed_id,
-            real_quantity: parseFloat(r.qty), unit: r.unit, observations: obs,
+            real_quantity: parseFloat(r.qty), unit: r.unit, observations: obs, photo_urls,
           });
           okEl.style.display = 'block';
           btn.textContent = 'Guardado ✓';
@@ -1245,6 +1250,7 @@ export async function submitFoodForm() {
             performed_by: userId,
             created_by: userId,
             observations: obs,
+            photo_urls,
           })));
           okEl.style.display = 'block';
           btn.textContent = `Guardado ✓ (${validRows.length} registro${validRows.length > 1 ? 's' : ''})`;

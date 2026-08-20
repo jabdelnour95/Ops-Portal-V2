@@ -1,6 +1,6 @@
 import { state } from './state.js';
 import { show } from './navigation.js';
-import { photoUploadWidget } from './photos.js';
+import { photoUploadWidget, uploadPhotoGroup, clearPhotoGroup } from './photos.js';
 import { stopRec } from './audio.js';
 
 const API = 'https://tierramor-api.jabdelnour95.workers.dev';
@@ -782,6 +782,7 @@ function _lotSubFields(action) {
 
 function _openNurseryLotSubForm(action) {
   _activeForm = `lot:${action}`;
+  clearPhotoGroup('nur-photos');
   document.getElementById('ft').textContent = _LOT_SUB_TITLES[action] || 'Registro de Lote';
   document.getElementById('fs-back').onclick = () => { stopRec(); _openNurseryLotDetail(_activeLot); };
   document.getElementById('fbody').innerHTML = `
@@ -1087,8 +1088,9 @@ export async function submitNurseryForm() {
 
       case 'lot:germination-tracking': {
         const estimated_germination_rate = parseFloat(document.getElementById('f-rate')?.value) || null;
+        const [photo_url = null] = await uploadPhotoGroup('nur-photos', 'nursery', 'germination-tracking', date);
         await _api(`/api/nursery/lots/${_activeLot.id}/germination-tracking`, 'POST', {
-          date, estimated_germination_rate, observations: obs, created_by: userId,
+          date, estimated_germination_rate, observations: obs, created_by: userId, photo_url,
         });
         okEl.style.display = 'block';
         btn.textContent = 'Guardado ✓';
@@ -1122,11 +1124,12 @@ export async function submitNurseryForm() {
         const quantity = isBio ? (parseFloat(document.getElementById('f-qty')?.value) || null) : null;
         const quantity_unit = isBio ? (document.getElementById('f-qty-unit')?.value || null) : null;
         const performed_by = document.getElementById('f-performed')?.value || userId;
+        const [photo_url = null] = await uploadPhotoGroup('nur-photos', 'nursery', 'maintenance', date);
 
         await _api(`/api/nursery/lots/${_activeLot.id}/maintenance`, 'POST', {
           date, maintenance_type, bio_product_id, quantity, quantity_unit,
           performed_by, created_by: userId,
-          observations: obs,
+          observations: obs, photo_url,
         });
         okEl.style.display = 'block';
         btn.textContent = 'Guardado ✓';
