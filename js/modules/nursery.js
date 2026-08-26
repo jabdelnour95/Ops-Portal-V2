@@ -2,6 +2,7 @@ import { state } from './state.js';
 import { show } from './navigation.js';
 import { photoUploadWidget, uploadPhotoGroup, clearPhotoGroup } from './photos.js';
 import { stopRec } from './audio.js';
+import { completeActiveTaskAssignment, describeTaskCompletion, extractRecordId, renderActiveTaskBanner, setActiveTaskAssignment } from './tasks.js';
 
 const API = 'https://tierramor-api.jabdelnour95.workers.dev';
 
@@ -126,6 +127,18 @@ function _aw(id, ph) {
 
 function _obsValue(id = 'obs') {
   return document.getElementById(`ta-${id}`)?.value?.trim() || null;
+}
+
+async function _finalizeNurseryTask(formKey, recordId, successBaseText = null) {
+  const okTxt = document.getElementById('nur-ok-txt');
+  if (okTxt && successBaseText) okTxt.textContent = successBaseText;
+  const taskResult = await completeActiveTaskAssignment({
+    moduleKey: 'vivero',
+    formKey,
+    recordId,
+  });
+  const taskMsg = describeTaskCompletion(taskResult);
+  if (okTxt && taskMsg) okTxt.textContent = `${okTxt.textContent} ${taskMsg}`;
 }
 
 // ─── INGREDIENT ROWS (sustrato: materia prima → entrada específica) ───────
@@ -521,7 +534,7 @@ const FORMS = {
 
 // ─── OPEN FORM ─────────────────────────────────────────────────────────────
 
-export async function openNurseryForm(type, record = null) {
+export async function openNurseryForm(type, record = null, task = null) {
   stopRec();
   _activeForm = type;
   _editing = record || null;
@@ -529,6 +542,7 @@ export async function openNurseryForm(type, record = null) {
 
   const def = FORMS[type];
   if (!def) return;
+  setActiveTaskAssignment(!record ? task : null);
 
   if (!_cats) await _loadCats();
 
@@ -548,6 +562,7 @@ export async function openNurseryForm(type, record = null) {
         <button class="btn-sub green" style="margin-top:.7rem;" onclick="openNurseryForm('${type}')">Agregar otro registro</button>
       </div>`;
   document.getElementById('fbody').innerHTML = `
+    ${renderActiveTaskBanner('vivero', type, record)}
     <h2 style="font-size:1.05rem;font-weight:normal;font-style:italic;color:var(--brown);margin-bottom:1.1rem;">${title}</h2>
     ${def.build()}
     <button class="btn-sub" id="nur-btn-sub" onclick="submitNurseryForm()">${record ? 'Guardar cambios' : 'Guardar registro'}</button>
@@ -981,9 +996,10 @@ export async function submitNurseryForm() {
         if (_editing) {
           await _api(`/api/nursery/raw-material-entries/${_editing.id}`, 'PATCH', { ...entradaFields, performed_by });
         } else {
-          await _api('/api/nursery/raw-material-entries', 'POST', {
+          const created = await _api('/api/nursery/raw-material-entries', 'POST', {
             ...entradaFields, performed_by, created_by: userId,
           });
+          await _finalizeNurseryTask('entrada', extractRecordId(created), '✅ Entrada registrada correctamente.');
         }
         okEl.style.display = 'block';
         btn.textContent = 'Guardado ✓';
@@ -1019,7 +1035,7 @@ export async function submitNurseryForm() {
             components,
           });
           okEl.style.display = 'block';
-          document.getElementById('nur-ok-txt').textContent = `✅ Batch ${batch.batch_id} preparado correctamente.`;
+          await _finalizeNurseryTask('sustrato', extractRecordId(batch), `✅ Batch ${batch.batch_id} preparado correctamente.`);
           btn.textContent = 'Guardado ✓';
         }
         _entryRows = [];
@@ -1043,7 +1059,8 @@ export async function submitNurseryForm() {
         if (_editing) {
           await _api(`/api/nursery/container-fills/${_editing.id}`, 'PATCH', { ...llenadoFields, performed_by });
         } else {
-          await _api('/api/nursery/container-fills', 'POST', { ...llenadoFields, performed_by, created_by: userId });
+          const created = await _api('/api/nursery/container-fills', 'POST', { ...llenadoFields, performed_by, created_by: userId });
+          await _finalizeNurseryTask('llenado', extractRecordId(created), '✅ Llenado registrado correctamente.');
         }
         okEl.style.display = 'block';
         btn.textContent = 'Guardado ✓';
@@ -1080,7 +1097,7 @@ export async function submitNurseryForm() {
             notes: obs,
           });
           okEl.style.display = 'block';
-          document.getElementById('nur-ok-txt').textContent = `✅ Lote ${lot.lot_id} creado correctamente.`;
+          await _finalizeNurseryTask('crear-lote', extractRecordId(lot), `✅ Lote ${lot.lot_id} creado correctamente.`);
           btn.textContent = 'Guardado ✓';
         }
         break;

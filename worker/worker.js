@@ -1,3 +1,5 @@
+import { computeNextDueDate, getTaskRecordResource, isValidTaskTarget, normalizeRecurrence } from './task-utils.mjs';
+
 /**
  * Tierramor API — Cloudflare Worker
  *
@@ -987,6 +989,146 @@ async function handleInventory(request, env, auth) {
   return proxySb(request, res);
 }
 
+// ─── TASKS ────────────────────────────────────────────────────────────────
+
+async function _attachTaskNames(env, tasks) {
+  const ids = [...new Set(tasks.flatMap(task => [task.assigned_to, task.assigned_by]).filter(Boolean))];
+  if (!ids.length) return tasks;
+  const res = await sbGet(env, 'profiles', `id=in.(${ids.join(',')})&select=id,full_name`);
+  const profiles = await res.json();
+  const names = Object.fromEntries((profiles || []).map(p => [p.id, p.full_name]));
+  return tasks.map(task => ({
+    ...task,
+    assigned_to_name: names[task.assigned_to] || null,
+    assigned_by_name: names[task.assigned_by] || null,
+  }));
+}
+
+function _validateTaskBody(body) {
+  if (!body.title?.trim()) return 'Ingresá un título para la tarea.';
+  if (!body.assigned_to) return 'Seleccioná a quién asignar la tarea.';
+  if (!body.due_date) return 'Ingresá la fecha límite.';
+  if (!isValidTaskTarget(body.module_key, body.form_key)) return 'La combinación módulo/formulario no es válida.';
+  const recurrence = normalizeRecurrence(body.recurrence || 'none');
+  if (!recurrence) return 'La recurrencia seleccionada no es válida.';
+  return null;
+}
+
+async function handleTasks(request, env, auth) {
+  const segments = new URL(request.url).pathname.split('/').filter(Boolean);
+  const itemId = segments[2];
+  const action = segments[3];
+  const url = new URL(request.url);
+
+  if (!itemId && request.method === 'GET') {
+    const requestedScope = url.searchParams.get('scope') || 'mine';
+    const scope = auth.role === 'admin' ? requestedScope : 'mine';
+    const status = url.searchParams.get('status') || 'pending';
+    const filters = [];
+
+    if (scope !== 'all') filters.push(`assigned_to=eq.${auth.userId}`);
+    if (status !== 'all') filters.push(`status=eq.${status}`);
+
+    const params = `${filters.join('&')}${filters.length ? '&' : ''}order=due_date.asc`;
+    const res = await sbGet(env, 'assigned_tasks', params);
+    if (!res.ok) return proxySb(request, res);
+    const rows = await res.json();
+    return okResponse(request, await _attachTaskNames(env, rows));
+  }
+
+  if (!itemId && request.method === 'POST') {
+    if (auth.role !== 'admin') {
+      return errResponse(request, 'FORBIDDEN', 'Solo un administrador puede asignar tareas', 403);
+    }
+
+    const body = await request.json();
+    const validationError = _validateTaskBody(body);
+    if (validationError) return errResponse(request, 'VALIDATION_ERROR', validationError, 400);
+
+    const assigneeRes = await sbGet(env, 'profiles', `id=eq.${body.assigned_to}&select=id,role&limit=1`);
+    if (!assigneeRes.ok) return proxySb(request, assigneeRes);
+    const assignees = await assigneeRes.json();
+    const assignee = assignees[0];
+    if (!assignee) return errResponse(request, 'VALIDATION_ERROR', 'La persona asignada no existe.', 400);
+    if (assignee.role === 'admin') {
+      return errResponse(request, 'VALIDATION_ERROR', 'Las tareas deben asignarse a cuentas no-admin.', 400);
+    }
+
+    const recurrence = normalizeRecurrence(body.recurrence || 'none');
+    const record_resource = getTaskRecordResource(body.module_key, body.form_key);
+    const createRes = await sbPost(env, 'assigned_tasks', {
+      title: body.title.trim(),
+      description: body.description?.trim() || null,
+      assigned_to: body.assigned_to,
+      assigned_by: auth.userId,
+      module_key: body.module_key,
+      form_key: body.form_key,
+      record_resource,
+      due_date: body.due_date,
+      recurrence,
+      status: 'pending',
+    });
+    if (!createRes.ok) return proxySb(request, createRes);
+    const created = (await createRes.json())[0];
+    return okResponse(request, (await _attachTaskNames(env, [created]))[0], 201);
+  }
+
+  if (itemId && action === 'complete' && request.method === 'PATCH') {
+    const currentRes = await sbGet(env, 'assigned_tasks', `id=eq.${itemId}&limit=1`);
+    if (!currentRes.ok) return proxySb(request, currentRes);
+    const currentRows = await currentRes.json();
+    const task = currentRows[0];
+    if (!task) return errResponse(request, 'NOT_FOUND', 'Tarea no encontrada', 404);
+    if (auth.role !== 'admin' && task.assigned_to !== auth.userId) {
+      return errResponse(request, 'FORBIDDEN', 'Solo la persona asignada puede completar esta tarea', 403);
+    }
+    if (task.status !== 'pending') {
+      return errResponse(request, 'VALIDATION_ERROR', 'La tarea ya no está pendiente', 409);
+    }
+
+    const body = await request.json();
+    if (!body.completed_record_id) {
+      return errResponse(request, 'VALIDATION_ERROR', 'Falta el registro que completó la tarea', 400);
+    }
+
+    const completedAt = new Date().toISOString();
+    const completeRes = await sbPatch(env, 'assigned_tasks', `id=eq.${itemId}`, {
+      status: 'completed',
+      completed_at: completedAt,
+      completed_by: auth.userId,
+      completed_record_id: body.completed_record_id,
+      completed_record_resource: task.record_resource,
+    });
+    if (!completeRes.ok) return proxySb(request, completeRes);
+    const completed = (await completeRes.json())[0];
+
+    let nextTask = null;
+    const nextDueDate = computeNextDueDate(task.due_date, task.recurrence);
+    if (nextDueDate) {
+      const nextRes = await sbPost(env, 'assigned_tasks', {
+        title: task.title,
+        description: task.description,
+        assigned_to: task.assigned_to,
+        assigned_by: task.assigned_by,
+        module_key: task.module_key,
+        form_key: task.form_key,
+        record_resource: task.record_resource,
+        due_date: nextDueDate,
+        recurrence: task.recurrence,
+        status: 'pending',
+        source_task_id: task.id,
+      });
+      if (nextRes.ok) nextTask = (await nextRes.json())[0];
+    }
+
+    const [hydratedCompleted] = await _attachTaskNames(env, [completed]);
+    const hydratedNext = nextTask ? (await _attachTaskNames(env, [nextTask]))[0] : null;
+    return okResponse(request, { task: hydratedCompleted, next_task: hydratedNext });
+  }
+
+  return errResponse(request, 'METHOD_NOT_ALLOWED', 'Método no permitido', 405);
+}
+
 // ─── FARM WORKERS ──────────────────────────────────────────────────────────
 
 async function handleFarmWorkers(request, env, auth) {
@@ -1164,6 +1306,7 @@ export default {
     if (pathname.startsWith('/api/bio/'))        return handleBio(request, env, auth);
     if (pathname.startsWith('/api/nursery/'))    return handleNursery(request, env, auth);
     if (pathname.startsWith('/api/inventory/'))  return handleInventory(request, env, auth);
+    if (pathname.startsWith('/api/tasks'))       return handleTasks(request, env, auth);
     if (pathname === '/api/farm-workers')        return handleFarmWorkers(request, env, auth);
     if (pathname.startsWith('/api/photos/'))     return handlePhotos(request, env, auth);
 

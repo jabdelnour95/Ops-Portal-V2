@@ -4,6 +4,7 @@ export const state = {
   refreshToken: null,
   currentDept: null,
   deptParent: 'ops-home',
+  activeTaskAssignment: null,
   pendingChecklist: null,
   activeRec: null,
   checkedMap: {},

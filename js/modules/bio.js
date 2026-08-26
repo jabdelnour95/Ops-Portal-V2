@@ -2,6 +2,7 @@ import { state } from './state.js';
 import { show } from './navigation.js';
 import { photoUploadWidget, uploadPhotoGroup, clearPhotoGroup } from './photos.js';
 import { stopRec } from './audio.js';
+import { completeActiveTaskAssignment, describeTaskCompletion, extractRecordId, renderActiveTaskBanner, setActiveTaskAssignment } from './tasks.js';
 
 const API = 'https://tierramor-api.jabdelnour95.workers.dev';
 
@@ -98,6 +99,18 @@ function _aw(id, ph) {
 
 function _obsValue() {
   return document.getElementById('ta-obs')?.value?.trim() || null;
+}
+
+async function _finalizeBioTask(formKey, recordId, successBaseText = null) {
+  const okTxt = document.getElementById('bio-ok-txt');
+  if (okTxt && successBaseText) okTxt.textContent = successBaseText;
+  const taskResult = await completeActiveTaskAssignment({
+    moduleKey: 'biofabrica',
+    formKey,
+    recordId,
+  });
+  const taskMsg = describeTaskCompletion(taskResult);
+  if (okTxt && taskMsg) okTxt.textContent = `${okTxt.textContent} ${taskMsg}`;
 }
 
 // ─── BATCH INPUT ROWS (materias primas consumidas en abrir-lote) ──────────
@@ -365,7 +378,7 @@ const FORMS = {
 
 // ─── OPEN FORM ─────────────────────────────────────────────────────────────
 
-export async function openBioForm(type, record = null) {
+export async function openBioForm(type, record = null, task = null) {
   stopRec();
   _activeForm = type;
   _editing = record || null;
@@ -374,6 +387,7 @@ export async function openBioForm(type, record = null) {
 
   const def = FORMS[type];
   if (!def) return;
+  setActiveTaskAssignment(!record ? task : null);
 
   if (!_cats) await _loadCats();
 
@@ -393,6 +407,7 @@ export async function openBioForm(type, record = null) {
         <button class="btn-sub green" style="margin-top:.7rem;" onclick="openBioForm('${type}')">Agregar otro registro</button>
       </div>`;
   document.getElementById('fbody').innerHTML = `
+    ${renderActiveTaskBanner('biofabrica', type, record)}
     <h2 style="font-size:1.05rem;font-weight:normal;font-style:italic;color:var(--brown);margin-bottom:1.1rem;">${title}</h2>
     ${def.build()}
     <button class="btn-sub" id="bio-btn-sub" onclick="submitBioForm()">${record ? 'Guardar cambios' : 'Guardar registro'}</button>
@@ -474,9 +489,10 @@ function _prefillBioForm(type, record) {
 
 // ─── CERRAR LOTE — picker + close form (dos pasos dentro de #fs) ──────────
 
-export async function openBioBatchPicker() {
+export async function openBioBatchPicker(task = null) {
   stopRec();
   _activeForm = 'cerrar-lote';
+  setActiveTaskAssignment(task);
   document.getElementById('ft').textContent = 'Cerrar Lote de Producción';
   document.getElementById('fs-back').onclick = () => { stopRec(); openBio(); };
   document.getElementById('fbody').innerHTML = `<div style="font-size:.78rem;font-family:sans-serif;color:var(--tm);font-style:italic;">Cargando lotes abiertos...</div>`;
@@ -500,6 +516,7 @@ export async function openBioBatchPicker() {
     }
 
     document.getElementById('fbody').innerHTML = `
+      ${renderActiveTaskBanner('biofabrica', 'cerrar-lote')}
       <h2 style="font-size:1.05rem;font-weight:normal;font-style:italic;color:var(--brown);margin-bottom:1.1rem;">Seleccioná el lote a cerrar</h2>
       <div id="batch-picker-list"></div>`;
 
@@ -526,6 +543,7 @@ function _openBioCloseForm(batch) {
   const product = (_cats?.finishedProducts || []).find(p => p.id === batch.finished_product_id);
 
   document.getElementById('fbody').innerHTML = `
+    ${renderActiveTaskBanner('biofabrica', 'cerrar-lote')}
     <h2 style="font-size:1.05rem;font-weight:normal;font-style:italic;color:var(--brown);margin-bottom:.4rem;">Cerrar Lote de Producción</h2>
     <div class="doc-note" style="margin-bottom:1rem;">
       <strong>${batch.batch_code}</strong> · ${product?.name || '—'} · Inicio: ${batch.date_start}
@@ -615,9 +633,10 @@ export async function submitBioForm() {
         if (_editing) {
           await _api(`/api/bio/raw-material-entries/${_editing.id}`, 'PATCH', { ...entradaFields, performed_by });
         } else {
-          await _api('/api/bio/raw-material-entries', 'POST', {
+          const created = await _api('/api/bio/raw-material-entries', 'POST', {
             ...entradaFields, performed_by, created_by: userId,
           });
+          await _finalizeBioTask('entrada', extractRecordId(created), '✅ Entrada registrada correctamente.');
         }
         okEl.style.display = 'block';
         btn.textContent = 'Guardado ✓';
@@ -652,7 +671,7 @@ export async function submitBioForm() {
             inputs,
           });
           okEl.style.display = 'block';
-          document.getElementById('bio-ok-txt').textContent = `✅ Lote ${batch.batch_code} abierto correctamente.`;
+          await _finalizeBioTask('abrir-lote', extractRecordId(batch), `✅ Lote ${batch.batch_code} abierto correctamente.`);
           btn.textContent = 'Guardado ✓';
         }
         _batchInputRows = [];
@@ -676,6 +695,7 @@ export async function submitBioForm() {
             .map(it => `${it.name} (requerido ${it.required}, disponible ${it.available})`).join('; ')}`;
         }
         okEl.style.display = 'block';
+        await _finalizeBioTask('cerrar-lote', extractRecordId(res), '✅ Lote cerrado correctamente.');
         btn.textContent = 'Lote cerrado ✓';
         _closingBatch = null;
         break;
@@ -706,7 +726,8 @@ export async function submitBioForm() {
         if (_editing) {
           await _api(`/api/bio/outputs/${_editing.id}`, 'PATCH', { ...outputFields, performed_by });
         } else {
-          await _api('/api/bio/outputs', 'POST', { ...outputFields, performed_by, created_by: userId });
+          const created = await _api('/api/bio/outputs', 'POST', { ...outputFields, performed_by, created_by: userId });
+          await _finalizeBioTask('salida', extractRecordId(created), '✅ Salida registrada correctamente.');
         }
         okEl.style.display = 'block';
         btn.textContent = 'Guardado ✓';

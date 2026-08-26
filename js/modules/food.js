@@ -2,6 +2,8 @@ import { state } from './state.js';
 import { show } from './navigation.js';
 import { photoUploadWidget, uploadPhotoGroup, clearPhotoGroup } from './photos.js';
 import { stopRec } from './audio.js';
+import { buildMaintenanceObservations, parseMaintenanceObservations } from './food-maintenance-meta.mjs';
+import { completeActiveTaskAssignment, describeTaskCompletion, extractRecordId, renderActiveTaskBanner, setActiveTaskAssignment } from './tasks.js';
 
 const API = 'https://tierramor-api.jabdelnour95.workers.dev';
 
@@ -14,10 +16,11 @@ let _inputRows    = [];  // bio-product rows (prep-cama, aplic-insumos)
 let _availRows    = [];  // availability item rows
 let _prepBedRows  = [];  // multiple bed rows for prep-cama
 let _applyBedRows = [];  // specific bed rows for aplic-insumos
+let _maintBedRows = [];  // specific bed rows for mantenimiento
 let _harvestRows  = [];  // one row per canasta in cosecha
 
 let _applyScope = 'area'; // 'area' | 'beds'
-let _maintScope = 'area'; // 'area' | 'bed'
+let _maintScope = 'area'; // 'area' | 'beds'
 let _activeForm = null;
 let _editing    = null;  // { id } cuando se edita un registro existente (admin), null si es carga nueva
 
@@ -204,6 +207,19 @@ function _getParticipants() {
     .map(i => i.value).join(', ');
 }
 
+function _getParticipantNames() {
+  return [...document.querySelectorAll('input[name="worker-participant"]:checked')]
+    .map(i => i.value);
+}
+
+function _setParticipants(names = []) {
+  const selected = new Set((names || []).map(name => String(name || '').trim()).filter(Boolean));
+  document.querySelectorAll('input[name="worker-participant"]').forEach(input => {
+    input.checked = selected.has(input.value);
+  });
+  window._foodUpdateWorkerLabel();
+}
+
 function _buildObs(obsId) {
   const obs = document.getElementById(`ta-${obsId}`)?.value?.trim() || null;
   const p   = _getParticipants() || null;
@@ -377,6 +393,39 @@ function _renderApplyBedRows() {
   _applyBedRows.forEach((row, i) => {
     const s = document.getElementById(`ab-bed-${i}`);
     if (s && row.bed_id) s.value = row.bed_id;
+  });
+}
+
+// ─── MAINT-BED ROWS (specific beds for mantenimiento) ─────────────────────
+
+export function addMaintBedRow() {
+  _maintBedRows.push({ bed_id: '' });
+  _renderMaintBedRows();
+}
+
+export function removeMaintBedRow(idx) {
+  _maintBedRows.splice(idx, 1);
+  _renderMaintBedRows();
+}
+
+function _renderMaintBedRows() {
+  const el = document.getElementById('maint-bed-rows');
+  if (!el) return;
+  const areaId = document.getElementById('f-area')?.value || '';
+  const subareaId = document.getElementById('f-subarea')?.value || '';
+  el.innerHTML = _maintBedRows.map((row, i) => `
+    <div style="display:flex;gap:.5rem;align-items:center;margin-bottom:.5rem;">
+      <select style="flex:1;background:white;border:1px solid rgba(84,66,54,.2);border-radius:8px;
+                     padding:.6rem .65rem;font-size:.82rem;font-family:sans-serif;color:var(--brown);outline:none;"
+              id="mb-bed-${i}" onchange="window._fmb(${i},'bed_id',this.value)">
+        ${_bedOptsByArea(areaId, subareaId, '— Cama —')}
+      </select>
+      <button onclick="removeMaintBedRow(${i})"
+              style="background:none;border:none;color:var(--clay);font-size:1.25rem;cursor:pointer;padding:.05rem .3rem;line-height:1;flex-shrink:0;">×</button>
+    </div>`).join('');
+  _maintBedRows.forEach((row, i) => {
+    const s = document.getElementById(`mb-bed-${i}`);
+    if (s && row.bed_id) _ensureBedOption(`mb-bed-${i}`, row.bed_id);
   });
 }
 
@@ -763,21 +812,23 @@ const FORMS = {
       <div class="fg"><label>Fecha</label><input type="date" id="f-fecha"></div>
       <div class="fg">
         <label>Área productiva</label>
-        <select id="f-area" onchange="window._foodAreaChanged('f-area','f-subarea','f-bed')">${_areaOpts()}</select>
+        <select id="f-area" onchange="window._foodMaintAreaChanged()">${_areaOpts()}</select>
       </div>
       ${_scopeToggle('Nivel de actividad', 'maint',
-        [['area','Área entera'], ['bed','Cama específica']],
+        [['area','Área entera'], ['beds','Camas específicas']],
         'window._foodMaintScope')}
       <div id="maint-bed-section" style="display:none;">
         <div class="fg">
           <label>Subárea</label>
-          <select id="f-subarea" onchange="window._foodSubareaChanged('f-area','f-subarea','f-bed')">
+          <div class="doc-note" style="margin-bottom:.35rem;">Opcional — usala para filtrar más rápido las camas de esta actividad.</div>
+          <select id="f-subarea" onchange="window._foodMaintScopeAreaChanged()">
             <option value="">— Seleccioná el área primero —</option>
           </select>
         </div>
         <div class="fg">
-          <label>Cama</label>
-          <select id="f-bed"><option value="">— Seleccioná el área primero —</option></select>
+          <label>Camas trabajadas</label>
+          <div id="maint-bed-rows" style="margin-top:.4rem;"></div>
+          <button type="button" onclick="addMaintBedRow()" class="add-row-btn">+ Agregar cama</button>
         </div>
       </div>
       <div class="fg">
@@ -808,6 +859,8 @@ const FORMS = {
       ${photoUploadWidget('food-photos')}`,
     afterRender: () => {
       _maintScope = 'area';
+      _maintBedRows = [];
+      _updateScopeBtns('maint', 'area');
     },
   },
 
@@ -892,7 +945,7 @@ function _updateApplyScopeUI() {
 
 // ─── OPEN FORM ─────────────────────────────────────────────────────────────
 
-export async function openFoodForm(type, record = null) {
+export async function openFoodForm(type, record = null, task = null) {
   stopRec();
   _activeForm  = type;
   _editing     = record ? { id: record.id, photo_urls: record.photo_urls || [] } : null;
@@ -900,11 +953,13 @@ export async function openFoodForm(type, record = null) {
   _availRows   = [];
   _prepBedRows = [];
   _applyBedRows = [];
+  _maintBedRows = [];
   _harvestRows = [];
   clearPhotoGroup('food-photos');
 
   const def = FORMS[type];
   if (!def) return;
+  setActiveTaskAssignment(!record ? task : null);
 
   if (!_cats) await _loadCats();
 
@@ -924,6 +979,7 @@ export async function openFoodForm(type, record = null) {
         <button class="btn-sub green" style="margin-top:.7rem;" onclick="openFoodForm('${type}')">Agregar otro registro</button>
       </div>`;
   document.getElementById('fbody').innerHTML = `
+    ${renderActiveTaskBanner('alimentos', type, record)}
     <h2 style="font-size:1.05rem;font-weight:normal;font-style:italic;color:var(--brown);margin-bottom:1.1rem;">${title}</h2>
     ${def.build()}
     <button class="btn-sub" id="food-btn-sub" onclick="submitFoodForm()">${record ? 'Guardar cambios' : 'Guardar registro'}</button>
@@ -944,12 +1000,32 @@ export async function openFoodForm(type, record = null) {
 }
 
 // ─── PREFILL (modo edición, admin) ─────────────────────────────────────────
-// Nota: los "Participantes" quedan sin re-seleccionar (se guardaron como texto
-// libre dentro de observations); el texto completo sigue visible y editable ahí.
+// Nota: mantenimiento sí rehidrata status / camas / participantes desde
+// observations. Los demás formularios siguen mostrando el texto tal cual.
 
 function _setVal(id, val) {
   const el = document.getElementById(id);
   if (el && val !== undefined && val !== null) el.value = val;
+}
+
+async function _finalizeFoodTask(recordId, successBaseText = null) {
+  const okTxt = document.getElementById('food-ok-txt');
+  if (okTxt && successBaseText) okTxt.textContent = successBaseText;
+  const taskResult = await completeActiveTaskAssignment({
+    moduleKey: 'alimentos',
+    formKey: _activeForm,
+    recordId,
+  });
+  const taskMsg = describeTaskCompletion(taskResult);
+  if (okTxt && taskMsg) okTxt.textContent = `${okTxt.textContent} ${taskMsg}`;
+}
+
+function _findBedsByCodes(codes = [], areaId = '') {
+  const allBeds = _cats?.beds || [];
+  return codes.map(code =>
+    allBeds.find(b => b.code === code && (!areaId || b.area_id === areaId))
+      || allBeds.find(b => b.code === code)
+  ).filter(Boolean);
 }
 
 function _prefillFoodForm(type, record) {
@@ -990,14 +1066,29 @@ function _prefillFoodForm(type, record) {
     }
 
     case 'mantenimiento': {
+      const parsed = parseMaintenanceObservations(record.observations);
+      const matchedBeds = _findBedsByCodes(parsed.bedCodes, record.area_id);
+      const unresolvedBeds = parsed.bedCodes.filter(code => !matchedBeds.some(b => b.code === code));
+      const noteFallback = unresolvedBeds.length ? `Camas registradas: ${unresolvedBeds.join(', ')}` : '';
+
       _setVal('f-area', record.area_id);
-      window._foodAreaChanged('f-area', 'f-subarea', 'f-bed');
+      window._foodMaintAreaChanged();
       (record.maintenance_types || []).forEach(v => {
         const cb = document.querySelector(`input[name="mt"][value="${v}"]`);
         if (cb) cb.checked = true;
       });
+      _setVal('f-status', parsed.status || 'completed');
       _setVal('f-duration', record.duration_minutes ?? '');
-      _setVal('ta-obs', record.observations || '');
+      _setVal('ta-obs', [parsed.notes, noteFallback].filter(Boolean).join('\n\n'));
+      _setParticipants(parsed.participants);
+
+      if (matchedBeds.length) {
+        _maintBedRows = matchedBeds.map(b => ({ bed_id: b.id }));
+        const subareas = [...new Set(matchedBeds.map(b => b.subarea_id).filter(Boolean))];
+        if (subareas.length === 1) _setVal('f-subarea', subareas[0]);
+        window._foodMaintScope('beds');
+        if (subareas.length === 1) window._foodMaintScopeAreaChanged();
+      }
       break;
     }
 
@@ -1086,11 +1177,11 @@ export async function submitFoodForm() {
           okEl.style.display = 'block';
           btn.textContent = 'Guardado ✓';
         } else {
-          await _api('/api/food/plantings', 'POST', {
+          const created = await _api('/api/food/plantings', 'POST', {
             ...plantingFields, performed_by: userId, created_by: userId,
           });
           okEl.style.display = 'block';
-          document.getElementById('food-ok-txt').textContent = '✅ Siembra registrada. El ID de lote fue generado automáticamente.';
+          await _finalizeFoodTask(extractRecordId(created), '✅ Siembra registrada. El ID de lote fue generado automáticamente.');
           btn.textContent = 'Guardado ✓';
         }
         break;
@@ -1110,7 +1201,7 @@ export async function submitFoodForm() {
           okEl.style.display = 'block';
           btn.textContent = 'Guardado ✓';
         } else {
-          await Promise.all(validBeds.map(r =>
+          const createdRows = await Promise.all(validBeds.map(r =>
             _api('/api/food/bed-preparations', 'POST', {
               date, bed_id: r.bed_id,
               performed_by: userId, created_by: userId,
@@ -1118,6 +1209,7 @@ export async function submitFoodForm() {
             })
           ));
           okEl.style.display = 'block';
+          await _finalizeFoodTask(extractRecordId(createdRows), `✅ Preparación registrada para ${validBeds.length} cama${validBeds.length > 1 ? 's' : ''}.`);
           btn.textContent = `Guardado ✓ (${validBeds.length} cama${validBeds.length > 1 ? 's' : ''})`;
         }
         break;
@@ -1149,12 +1241,13 @@ export async function submitFoodForm() {
             observations: fullObs, items, photo_urls,
           });
         } else {
-          await _api('/api/food/input-applications', 'POST', {
+          const created = await _api('/api/food/input-applications', 'POST', {
             date, area_id, method,
             total_liquid_quantity: totalLiquid,
             performed_by: userId, created_by: userId,
             observations: fullObs, items, photo_urls,
           });
+          await _finalizeFoodTask(extractRecordId(created), '✅ Aplicación registrada correctamente.');
         }
         okEl.style.display = 'block';
         btn.textContent = 'Guardado ✓';
@@ -1167,13 +1260,19 @@ export async function submitFoodForm() {
         const types = [...document.querySelectorAll('input[name="mt"]:checked')].map(el => el.value);
         if (!types.length) throw new Error('Seleccioná al menos un tipo de actividad.');
         const status  = document.getElementById('f-status')?.value || 'completed';
-        const bedNote = _maintScope === 'bed'
-          ? (() => { const b = document.getElementById('f-bed')?.value; const bed = (_cats?.beds||[]).find(x=>x.id===b); return bed ? `Cama: ${bed.code}` : null; })()
-          : null;
-        const fullObs = [bedNote, status === 'pending' ? '⏳ Quedó pendiente de terminar.' : null,
-                         document.getElementById('ta-obs')?.value?.trim(),
-                         _getParticipants() ? `Participantes: ${_getParticipants()}` : null]
-                        .filter(Boolean).join('\n\n') || null;
+        const selectedBedIds = _maintScope === 'beds'
+          ? [...new Set(_maintBedRows.map(r => r.bed_id).filter(Boolean))]
+          : [];
+        if (_maintScope === 'beds' && !selectedBedIds.length) {
+          throw new Error('Agregá al menos una cama o cambiá el nivel de actividad a Área entera.');
+        }
+        const bedCodes = selectedBedIds.map(id => (_cats?.beds || []).find(b => b.id === id)?.code).filter(Boolean);
+        const fullObs = buildMaintenanceObservations({
+          bedCodes,
+          status,
+          notes: document.getElementById('ta-obs')?.value?.trim() || '',
+          participants: _getParticipantNames(),
+        });
         const maintFields = {
           date, area_id,
           maintenance_types: types,
@@ -1185,9 +1284,10 @@ export async function submitFoodForm() {
         if (_editing) {
           await _api(`/api/food/area-maintenance/${_editing.id}`, 'PATCH', maintFields);
         } else {
-          await _api('/api/food/area-maintenance', 'POST', {
+          const created = await _api('/api/food/area-maintenance', 'POST', {
             ...maintFields, performed_by: userId, created_by: userId,
           });
+          await _finalizeFoodTask(extractRecordId(created), '✅ Mantenimiento registrado correctamente.');
         }
         okEl.style.display = 'block';
         btn.textContent = 'Guardado ✓';
@@ -1215,12 +1315,13 @@ export async function submitFoodForm() {
             survey_date: date, week_ref, observations: fullObs, items,
           });
         } else {
-          await _api('/api/food/availability', 'POST', {
+          const created = await _api('/api/food/availability', 'POST', {
             survey_date: date, week_ref,
             created_by: userId,
             observations: fullObs,
             items,
           });
+          await _finalizeFoodTask(extractRecordId(created), '✅ Disponibilidad registrada correctamente.');
         }
         okEl.style.display = 'block';
         btn.textContent = 'Guardado ✓';
@@ -1240,7 +1341,7 @@ export async function submitFoodForm() {
           okEl.style.display = 'block';
           btn.textContent = 'Guardado ✓';
         } else {
-          await Promise.all(validRows.map(r => _api('/api/food/harvests', 'POST', {
+          const createdRows = await Promise.all(validRows.map(r => _api('/api/food/harvests', 'POST', {
             date,
             crop_id: r.crop_id,
             area_id: r.area_id,
@@ -1253,6 +1354,7 @@ export async function submitFoodForm() {
             photo_urls,
           })));
           okEl.style.display = 'block';
+          await _finalizeFoodTask(extractRecordId(createdRows), `✅ Cosecha registrada (${validRows.length} registro${validRows.length > 1 ? 's' : ''}).`);
           btn.textContent = `Guardado ✓ (${validRows.length} registro${validRows.length > 1 ? 's' : ''})`;
         }
         _harvestRows = [];
@@ -1329,6 +1431,22 @@ window._foodApplyScopeAreaChanged = () => {
   _renderApplyBedRows();
 };
 
+// Area select changed in mantenimiento → repopulate subarea, then refresh bed rows
+window._foodMaintAreaChanged = () => {
+  const areaId = document.getElementById('f-area')?.value || '';
+  const subSel = document.getElementById('f-subarea');
+  if (subSel) {
+    subSel.innerHTML = _subareaOptsByArea(areaId);
+    subSel.value = '';
+  }
+  _maintBedRows = [];
+  _renderMaintBedRows();
+};
+
+window._foodMaintScopeAreaChanged = () => {
+  _renderMaintBedRows();
+};
+
 // Scope toggles
 window._foodApplyScope = (scope) => {
   _applyScope = scope;
@@ -1339,7 +1457,11 @@ window._foodMaintScope = (scope) => {
   _maintScope = scope;
   _updateScopeBtns('maint', scope);
   const sec = document.getElementById('maint-bed-section');
-  if (sec) sec.style.display = scope === 'bed' ? 'block' : 'none';
+  if (sec) sec.style.display = scope === 'beds' ? 'block' : 'none';
+  if (scope === 'beds') {
+    if (!_maintBedRows.length) addMaintBedRow();
+    else _renderMaintBedRows();
+  }
 };
 
 // New crop inline toggle
@@ -1423,4 +1545,8 @@ window._foodUpdateWorkerLabel = () => {
     lbl.textContent = 'Seleccionar participantes...';
     lbl.style.color = 'rgba(84,66,54,.5)';
   }
+};
+
+window._fmb = (i, key, val) => {
+  if (_maintBedRows[i]) _maintBedRows[i][key] = val;
 };

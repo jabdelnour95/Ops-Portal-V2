@@ -43,6 +43,8 @@ export function renderHome() {
       </div>
     </div>`;
   }).join('');
+
+  if (window._renderHomeTasks) window._renderHomeTasks();
 }
 
 function _toggleAdminTiles(screenId) {
