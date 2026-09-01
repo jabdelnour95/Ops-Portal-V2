@@ -28,4 +28,4 @@ CREATE INDEX assigned_tasks_status_due_idx
   ON public.assigned_tasks (status, due_date);
 
 COMMENT ON TABLE public.assigned_tasks IS
-  'Tareas asignadas por admin a perfiles no-admin. Se completan al enviar el formulario requerido.';
+  'Tareas asignadas por admin a perfiles no-admin. Una asignación a varias personas crea una fila independiente por persona; se completan al enviar el formulario requerido.';

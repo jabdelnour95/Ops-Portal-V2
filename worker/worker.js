@@ -1,4 +1,4 @@
-import { computeNextDueDate, getTaskRecordResource, isValidTaskTarget, normalizeRecurrence } from './task-utils.mjs';
+import { computeNextDueDate, getTaskRecordResource, isValidTaskTarget, normalizeRecurrence, normalizeTaskAssigneeIds } from './task-utils.mjs';
 
 /**
  * Tierramor API — Cloudflare Worker
@@ -1006,7 +1006,7 @@ async function _attachTaskNames(env, tasks) {
 
 function _validateTaskBody(body) {
   if (!body.title?.trim()) return 'Ingresá un título para la tarea.';
-  if (!body.assigned_to) return 'Seleccioná a quién asignar la tarea.';
+  if (!normalizeTaskAssigneeIds(body.assigned_to).length) return 'Seleccioná al menos una persona para la tarea.';
   if (!body.due_date) return 'Ingresá la fecha límite.';
   if (!isValidTaskTarget(body.module_key, body.form_key)) return 'La combinación módulo/formulario no es válida.';
   const recurrence = normalizeRecurrence(body.recurrence || 'none');
@@ -1045,21 +1045,24 @@ async function handleTasks(request, env, auth) {
     const validationError = _validateTaskBody(body);
     if (validationError) return errResponse(request, 'VALIDATION_ERROR', validationError, 400);
 
-    const assigneeRes = await sbGet(env, 'profiles', `id=eq.${body.assigned_to}&select=id,role&limit=1`);
+    const assigneeIds = normalizeTaskAssigneeIds(body.assigned_to);
+    const assigneeRes = await sbGet(env, 'profiles', `id=in.(${assigneeIds.join(',')})&select=id,role`);
     if (!assigneeRes.ok) return proxySb(request, assigneeRes);
     const assignees = await assigneeRes.json();
-    const assignee = assignees[0];
-    if (!assignee) return errResponse(request, 'VALIDATION_ERROR', 'La persona asignada no existe.', 400);
-    if (assignee.role === 'admin') {
+    if (assignees.length !== assigneeIds.length) {
+      return errResponse(request, 'VALIDATION_ERROR', 'Una de las personas asignadas no existe.', 400);
+    }
+    if (assignees.some(assignee => assignee.role === 'admin')) {
       return errResponse(request, 'VALIDATION_ERROR', 'Las tareas deben asignarse a cuentas no-admin.', 400);
     }
 
     const recurrence = normalizeRecurrence(body.recurrence || 'none');
     const record_resource = getTaskRecordResource(body.module_key, body.form_key);
-    const createRes = await sbPost(env, 'assigned_tasks', {
+    // Each assignee gets an independent task so completion and recurrence stay personal.
+    const createRes = await sbPost(env, 'assigned_tasks', assigneeIds.map(assigned_to => ({
       title: body.title.trim(),
       description: body.description?.trim() || null,
-      assigned_to: body.assigned_to,
+      assigned_to,
       assigned_by: auth.userId,
       module_key: body.module_key,
       form_key: body.form_key,
@@ -1067,10 +1070,10 @@ async function handleTasks(request, env, auth) {
       due_date: body.due_date,
       recurrence,
       status: 'pending',
-    });
+    })));
     if (!createRes.ok) return proxySb(request, createRes);
-    const created = (await createRes.json())[0];
-    return okResponse(request, (await _attachTaskNames(env, [created]))[0], 201);
+    const created = await createRes.json();
+    return okResponse(request, await _attachTaskNames(env, created), 201);
   }
 
   if (itemId && action === 'complete' && request.method === 'PATCH') {

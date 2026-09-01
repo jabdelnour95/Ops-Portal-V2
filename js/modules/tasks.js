@@ -239,16 +239,16 @@ export async function openTaskCreateForm() {
 
   try {
     const users = await _loadAssignableUsers();
-    const userOpts = `<option value="">— Colaborador —</option>${users
-      .map(u => `<option value="${u.id}">${_esc(u.full_name || u.email)}${u.profile_departments?.length ? ` · ${_esc(u.profile_departments.map(d => d.department).join(', '))}` : ''}</option>`)
-      .join('')}`;
+    const userOpts = users
+      .map(u => `<label style="display:flex;align-items:flex-start;gap:.55rem;padding:.55rem .1rem;border-bottom:1px solid rgba(84,66,54,.09);font-size:.84rem;font-family:sans-serif;color:var(--brown);cursor:pointer;"><input type="checkbox" name="task-assigned-to" value="${u.id}" style="margin-top:.16rem;"> <span>${_esc(u.full_name || u.email)}${u.profile_departments?.length ? ` <span style="color:var(--tm);">· ${_esc(u.profile_departments.map(d => d.department).join(', '))}</span>` : ''}</span></label>`)
+      .join('');
     const today = new Date().toISOString().slice(0, 10);
 
     document.getElementById('conbody').innerHTML = `
-      <div style="font-size:.78rem;font-family:sans-serif;color:var(--tm);margin-bottom:1rem;">Asigná una tarea a un usuario no-admin. Al completar el formulario indicado, la tarea se marcará como completada automáticamente.</div>
+      <div style="font-size:.78rem;font-family:sans-serif;color:var(--tm);margin-bottom:1rem;">Asigná una tarea a una o más personas no-admin. Cada persona completa su propia tarea y, si es recurrente, recibe su siguiente instancia al completarla.</div>
       <div class="fg"><label>Título</label><input type="text" id="task-title" placeholder="Ej: Revisar camas de Huerta norte"></div>
       <div class="fg"><label>Descripción</label><textarea id="task-description" placeholder="Detalle adicional para la persona responsable..." style="width:100%;background:white;border:1px solid rgba(84,66,54,.2);border-radius:8px;padding:.7rem .85rem;font-size:.9rem;font-family:sans-serif;color:var(--brown);outline:none;resize:none;height:88px;line-height:1.5;"></textarea></div>
-      <div class="fg"><label>Asignada a</label><select id="task-assigned-to">${userOpts}</select></div>
+      <div class="fg"><label>Asignada a</label><div style="max-height:13rem;overflow:auto;background:white;border:1px solid rgba(84,66,54,.2);border-radius:8px;padding:0 .7rem;">${userOpts || '<div style="padding:.7rem 0;font-size:.8rem;font-family:sans-serif;color:var(--tm);">No hay colaboradores no-admin disponibles.</div>'}</div><div style="font-size:.7rem;font-family:sans-serif;color:var(--tm);margin-top:.3rem;">Seleccioná una o más personas.</div></div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:.7rem;">
         <div class="fg"><label>Módulo</label><select id="task-module" onchange="window._taskModuleChanged()">${_moduleOptions()}</select></div>
         <div class="fg"><label>Formulario a completar</label><select id="task-form"><option value="">— Elegí el módulo primero —</option></select></div>
@@ -292,14 +292,14 @@ export async function submitTaskCreate() {
   try {
     const title = document.getElementById('task-title')?.value?.trim();
     const description = document.getElementById('task-description')?.value?.trim() || null;
-    const assigned_to = document.getElementById('task-assigned-to')?.value;
+    const assigned_to = [...document.querySelectorAll('input[name="task-assigned-to"]:checked')].map(input => input.value);
     const module_key = document.getElementById('task-module')?.value;
     const form_key = document.getElementById('task-form')?.value;
     const due_date = document.getElementById('task-due-date')?.value;
     const recurrence = document.getElementById('task-recurrence')?.value || 'none';
 
     if (!title) throw new Error('Ingresá un título para la tarea.');
-    if (!assigned_to) throw new Error('Seleccioná a quién asignar la tarea.');
+    if (!assigned_to.length) throw new Error('Seleccioná al menos una persona para la tarea.');
     if (!module_key || !form_key) throw new Error('Seleccioná módulo y formulario.');
     if (!due_date) throw new Error('Ingresá la fecha límite.');
 
@@ -313,7 +313,10 @@ export async function submitTaskCreate() {
       recurrence,
     });
 
-    okTxt.textContent = `✅ Tarea asignada correctamente para ${created.assigned_to_name || 'el colaborador'}.`;
+    const count = Array.isArray(created) ? created.length : 1;
+    okTxt.textContent = count === 1
+      ? `✅ Tarea asignada correctamente para ${created[0]?.assigned_to_name || 'el colaborador'}.`
+      : `✅ Tarea asignada correctamente para ${count} colaboradores.`;
     okEl.style.display = 'block';
     btn.textContent = 'Guardado ✓';
     renderHomeTasks().catch(() => {});

@@ -47,6 +47,11 @@ export function normalizeRecurrence(value) {
   return ['none', 'weekly', 'biweekly', 'monthly'].includes(recurrence) ? recurrence : null;
 }
 
+export function normalizeTaskAssigneeIds(value) {
+  const values = Array.isArray(value) ? value : [value];
+  return [...new Set(values.filter(id => typeof id === 'string' && id.trim()))];
+}
+
 function isoDateFromUtc(date) {
   return date.toISOString().slice(0, 10);
 }

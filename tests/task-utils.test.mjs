@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { computeNextDueDate, getTaskRecordResource, isValidTaskTarget, normalizeRecurrence } from '../worker/task-utils.mjs';
+import { computeNextDueDate, getTaskRecordResource, isValidTaskTarget, normalizeRecurrence, normalizeTaskAssigneeIds } from '../worker/task-utils.mjs';
 
 test('validates known task target combinations', () => {
   assert.equal(isValidTaskTarget('alimentos', 'mantenimiento'), true);
@@ -14,6 +14,12 @@ test('normalizes supported recurrence values', () => {
   assert.equal(normalizeRecurrence('weekly'), 'weekly');
   assert.equal(normalizeRecurrence('MONTHLY'), 'monthly');
   assert.equal(normalizeRecurrence('custom'), null);
+});
+
+test('normalizes one or more unique task assignees', () => {
+  assert.deepEqual(normalizeTaskAssigneeIds('worker-a'), ['worker-a']);
+  assert.deepEqual(normalizeTaskAssigneeIds(['worker-a', 'worker-b', 'worker-a', '', null]), ['worker-a', 'worker-b']);
+  assert.deepEqual(normalizeTaskAssigneeIds([]), []);
 });
 
 test('computes next due date for weekly, biweekly, and monthly tasks', () => {
