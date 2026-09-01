@@ -1076,6 +1076,58 @@ async function handleTasks(request, env, auth) {
     return okResponse(request, await _attachTaskNames(env, created), 201);
   }
 
+  if (itemId && !action && request.method === 'PATCH') {
+    if (auth.role !== 'admin') {
+      return errResponse(request, 'FORBIDDEN', 'Solo un administrador puede editar tareas', 403);
+    }
+
+    const body = await request.json();
+    const validationError = _validateTaskBody(body);
+    if (validationError) return errResponse(request, 'VALIDATION_ERROR', validationError, 400);
+
+    const assigneeIds = normalizeTaskAssigneeIds(body.assigned_to);
+    if (assigneeIds.length !== 1) {
+      return errResponse(request, 'VALIDATION_ERROR', 'Una tarea existente solo puede tener una persona asignada.', 400);
+    }
+    const assigneeRes = await sbGet(env, 'profiles', `id=eq.${assigneeIds[0]}&select=id,role&limit=1`);
+    if (!assigneeRes.ok) return proxySb(request, assigneeRes);
+    const assignee = (await assigneeRes.json())[0];
+    if (!assignee) return errResponse(request, 'VALIDATION_ERROR', 'La persona asignada no existe.', 400);
+    if (assignee.role === 'admin') {
+      return errResponse(request, 'VALIDATION_ERROR', 'Las tareas deben asignarse a cuentas no-admin.', 400);
+    }
+
+    const recurrence = normalizeRecurrence(body.recurrence || 'none');
+    const updateRes = await sbPatch(env, 'assigned_tasks', `id=eq.${itemId}&status=eq.pending`, {
+      title: body.title.trim(),
+      description: body.description?.trim() || null,
+      assigned_to: assigneeIds[0],
+      module_key: body.module_key,
+      form_key: body.form_key,
+      record_resource: getTaskRecordResource(body.module_key, body.form_key),
+      due_date: body.due_date,
+      recurrence,
+    });
+    if (!updateRes.ok) return proxySb(request, updateRes);
+    const updated = (await updateRes.json())[0];
+    if (!updated) return errResponse(request, 'CONFLICT', 'La tarea no existe o ya fue completada.', 409);
+    return okResponse(request, (await _attachTaskNames(env, [updated]))[0]);
+  }
+
+  if (itemId && !action && request.method === 'DELETE') {
+    if (auth.role !== 'admin') {
+      return errResponse(request, 'FORBIDDEN', 'Solo un administrador puede eliminar tareas', 403);
+    }
+    // Keep an already-created recurrence usable when its previous instance is removed.
+    const unlinkRes = await sbPatch(env, 'assigned_tasks', `source_task_id=eq.${itemId}`, { source_task_id: null });
+    if (!unlinkRes.ok) return proxySb(request, unlinkRes);
+    const deleteRes = await sbDelete(env, 'assigned_tasks', `id=eq.${itemId}`);
+    if (!deleteRes.ok) return proxySb(request, deleteRes);
+    const deleted = (await deleteRes.json())[0];
+    if (!deleted) return errResponse(request, 'NOT_FOUND', 'Tarea no encontrada', 404);
+    return okResponse(request, { task: deleted });
+  }
+
   if (itemId && action === 'complete' && request.method === 'PATCH') {
     const currentRes = await sbGet(env, 'assigned_tasks', `id=eq.${itemId}&limit=1`);
     if (!currentRes.ok) return proxySb(request, currentRes);

@@ -85,7 +85,7 @@ function _isAdmin() {
   return state.currentUser?.profile?.role === 'admin';
 }
 
-function _taskCard(task, idx, { showAssignee = false, showAssignedBy = false, showAction = false } = {}) {
+function _taskCard(task, idx, { showAssignee = false, showAssignedBy = false, showAction = false, showManage = false } = {}) {
   const labels = _targetLabel(task);
   const dueTone = task.status === 'pending'
     ? 'background:rgba(153,92,68,.10);color:var(--clay);'
@@ -112,6 +112,10 @@ function _taskCard(task, idx, { showAssignee = false, showAssignedBy = false, sh
     <div style="font-size:.68rem;font-family:sans-serif;color:var(--tm);line-height:1.55;margin-top:.55rem;">${meta.map(_esc).join(' · ')}</div>
     ${showAction ? `<div style="display:flex;gap:.5rem;margin-top:.75rem;">
       <button class="btn-sub green" style="margin:0;flex:1;padding:.55rem .7rem;font-size:.78rem;" onclick="openTaskFromList(${idx})">Completar tarea</button>
+    </div>` : ''}
+    ${showManage ? `<div style="display:flex;gap:.5rem;margin-top:.75rem;">
+      ${task.status === 'pending' ? `<button class="btn-sub" style="margin:0;flex:1;padding:.55rem .7rem;font-size:.78rem;" onclick="openTaskEditForm(${idx})">Editar</button>` : ''}
+      <button class="btn-sub" style="margin:0;${task.status === 'pending' ? 'flex:1;' : 'width:100%;'}padding:.55rem .7rem;font-size:.78rem;background:white;color:#b23a2c;border:1px solid rgba(178,58,44,.3);" onclick="deleteAssignedTask(${idx})">Eliminar</button>
     </div>` : ''}
   </div>`;
 }
@@ -206,6 +210,7 @@ export async function openTaskCenter(status = 'pending') {
           showAssignee: _isAdmin(),
           showAssignedBy: false,
           showAction: !_isAdmin() && task.status === 'pending',
+          showManage: _isAdmin(),
         })).join('')
       : `<div style="font-size:.8rem;font-family:sans-serif;color:var(--tm);font-style:italic;">No hay tareas en esta vista.</div>`;
     document.getElementById('conbody').innerHTML = `${_taskCenterHeader(status)}${listHtml}`;
@@ -328,6 +333,88 @@ export async function submitTaskCreate() {
   }
 }
 
+export async function openTaskEditForm(idx) {
+  if (!_isAdmin()) return;
+  const task = _taskRows[idx];
+  if (!task || task.status !== 'pending') return;
+
+  document.getElementById('con-title').textContent = 'Editar Tarea';
+  document.getElementById('con-back').onclick = () => openTaskCenter('pending');
+  document.getElementById('conbody').innerHTML = `<div style="font-size:.8rem;font-family:sans-serif;color:var(--tm);font-style:italic;">Cargando formulario...</div>`;
+  show('con-screen');
+
+  try {
+    const users = await _loadAssignableUsers();
+    const userOpts = `<option value="">— Colaborador —</option>${users.map(u =>
+      `<option value="${u.id}" ${u.id === task.assigned_to ? 'selected' : ''}>${_esc(u.full_name || u.email)}</option>`).join('')}`;
+    document.getElementById('conbody').innerHTML = `
+      <div style="font-size:.78rem;font-family:sans-serif;color:var(--tm);margin-bottom:1rem;">Los cambios aplican solo a esta tarea de ${_esc(task.assigned_to_name || 'la persona asignada')}.</div>
+      <div class="fg"><label>Título</label><input type="text" id="task-edit-title" value="${_esc(task.title)}"></div>
+      <div class="fg"><label>Descripción</label><textarea id="task-edit-description" style="width:100%;background:white;border:1px solid rgba(84,66,54,.2);border-radius:8px;padding:.7rem .85rem;font-size:.9rem;font-family:sans-serif;color:var(--brown);outline:none;resize:none;height:88px;line-height:1.5;">${_esc(task.description || '')}</textarea></div>
+      <div class="fg"><label>Asignada a</label><select id="task-edit-assigned-to">${userOpts}</select></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.7rem;">
+        <div class="fg"><label>Módulo</label><select id="task-edit-module" onchange="window._taskEditModuleChanged()">${_moduleOptions()}</select></div>
+        <div class="fg"><label>Formulario a completar</label><select id="task-edit-form"></select></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.7rem;">
+        <div class="fg"><label>Fecha límite</label><input type="date" id="task-edit-due-date" value="${_esc(task.due_date)}"></div>
+        <div class="fg"><label>Recurrencia</label><select id="task-edit-recurrence">${Object.entries(RECURRENCE_LABELS).map(([key, label]) => `<option value="${key}" ${key === task.recurrence ? 'selected' : ''}>${label}</option>`).join('')}</select></div>
+      </div>
+      <button class="btn-sub green" id="task-edit-save-btn" onclick="submitTaskEdit('${task.id}')">Guardar cambios</button>
+      <div id="task-edit-err" style="display:none;background:rgba(192,57,43,.08);border:1px solid rgba(192,57,43,.3);border-radius:10px;padding:1rem;text-align:center;margin-top:.9rem;"><p style="font-size:.82rem;font-family:sans-serif;color:#c0392b;" id="task-edit-err-txt"></p></div>`;
+    document.getElementById('task-edit-module').value = task.module_key;
+    document.getElementById('task-edit-form').innerHTML = _formOptions(task.module_key);
+    document.getElementById('task-edit-form').value = task.form_key;
+  } catch (e) {
+    document.getElementById('conbody').innerHTML = `<div style="font-size:.82rem;font-family:sans-serif;color:#c0392b;">${_esc(e.message)}</div>`;
+  }
+}
+
+export async function submitTaskEdit(taskId) {
+  const btn = document.getElementById('task-edit-save-btn');
+  const errEl = document.getElementById('task-edit-err');
+  const errTxt = document.getElementById('task-edit-err-txt');
+  btn.disabled = true;
+  btn.textContent = 'Guardando...';
+  errEl.style.display = 'none';
+
+  try {
+    const body = {
+      title: document.getElementById('task-edit-title')?.value?.trim(),
+      description: document.getElementById('task-edit-description')?.value?.trim() || null,
+      assigned_to: document.getElementById('task-edit-assigned-to')?.value,
+      module_key: document.getElementById('task-edit-module')?.value,
+      form_key: document.getElementById('task-edit-form')?.value,
+      due_date: document.getElementById('task-edit-due-date')?.value,
+      recurrence: document.getElementById('task-edit-recurrence')?.value || 'none',
+    };
+    if (!body.title || !body.assigned_to || !body.module_key || !body.form_key || !body.due_date) {
+      throw new Error('Completá todos los campos obligatorios.');
+    }
+    await _api(`/api/tasks/${taskId}`, 'PATCH', body);
+    renderHomeTasks().catch(() => {});
+    openTaskCenter('pending');
+  } catch (e) {
+    errTxt.textContent = e.message;
+    errEl.style.display = 'block';
+    btn.disabled = false;
+    btn.textContent = 'Guardar cambios';
+  }
+}
+
+export async function deleteAssignedTask(idx) {
+  if (!_isAdmin()) return;
+  const task = _taskRows[idx];
+  if (!task || !window.confirm(`¿Eliminar la tarea "${task.title}"? Esta acción no se puede deshacer.`)) return;
+  try {
+    await _api(`/api/tasks/${task.id}`, 'DELETE');
+    renderHomeTasks().catch(() => {});
+    openTaskCenter(task.status === 'completed' ? 'completed' : 'pending');
+  } catch (e) {
+    window.alert(`No se pudo eliminar la tarea: ${e.message}`);
+  }
+}
+
 export function openTaskFromList(idx) {
   const task = _taskRows[idx] || _homePendingRows[idx];
   if (!task) return;
@@ -405,5 +492,11 @@ export function describeTaskCompletion(result) {
 window._taskModuleChanged = () => {
   const moduleKey = document.getElementById('task-module')?.value;
   const formSel = document.getElementById('task-form');
+  if (formSel) formSel.innerHTML = _formOptions(moduleKey);
+};
+
+window._taskEditModuleChanged = () => {
+  const moduleKey = document.getElementById('task-edit-module')?.value;
+  const formSel = document.getElementById('task-edit-form');
   if (formSel) formSel.innerHTML = _formOptions(moduleKey);
 };

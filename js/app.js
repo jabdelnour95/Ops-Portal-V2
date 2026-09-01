@@ -24,7 +24,7 @@ import { openVivero, openNurseryForm, submitNurseryForm,
          openNurseryLotPicker, openNurseryQuoteForm, openNurseryQuotes,
          openNurseryInventory } from './modules/nursery.js';
 import { openRecordsHome, openRecordsList, editRecord, deleteRecord } from './modules/records.js';
-import { renderHomeTasks, openTaskCenter, openTaskCreateForm, submitTaskCreate, openTaskFromList } from './modules/tasks.js';
+import { renderHomeTasks, openTaskCenter, openTaskCreateForm, submitTaskCreate, openTaskFromList, openTaskEditForm, submitTaskEdit, deleteAssignedTask } from './modules/tasks.js';
 
 // Expose to HTML event handlers (onclick attributes) and cross-module calls
 Object.assign(window, {
@@ -59,7 +59,7 @@ Object.assign(window, {
   // Records (admin: ver/editar/borrar registros de Finca)
   openRecordsHome, openRecordsList, editRecord, deleteRecord,
   // Tasks
-  openTaskCenter, openTaskCreateForm, submitTaskCreate, openTaskFromList,
+  openTaskCenter, openTaskCreateForm, submitTaskCreate, openTaskFromList, openTaskEditForm, submitTaskEdit, deleteAssignedTask,
   _renderHomeTasks: renderHomeTasks,
   // Internal bindings used by navigation.js to avoid circular imports
   _openChecklistMenu: openChecklistMenu,
