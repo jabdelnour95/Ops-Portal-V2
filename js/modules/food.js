@@ -11,6 +11,7 @@ const API = 'https://tierramor-api.jabdelnour95.workers.dev';
 
 let _cats       = null;  // { beds, crops, areas, subareas, bio }
 let _plantings  = null;  // preloaded planting lots for lot-id lookup
+let _activeLotsByBed = new Map();
 
 let _inputRows    = [];  // bio-product rows (prep-cama, aplic-insumos)
 let _availRows    = [];  // availability item rows
@@ -84,6 +85,24 @@ const _cropOpts = () => `<option value="">— Cultivo —</option>${_opts(_cats?
   <option value="__new__">── Nuevo cultivo ──</option>`;
 const _areaOpts = () => `<option value="">— Área —</option>${_opts(_cats?.areas || [])}`;
 const _bioOpts  = () => `<option value="">— Producto —</option>${_opts(_cats?.bio  || [])}`;
+
+async function _activeLotsForBed(bedId) {
+  if (!bedId) return [];
+  if (_activeLotsByBed.has(bedId)) return _activeLotsByBed.get(bedId);
+  const lots = await _api(`/api/food/planting-lots?bed_id=${encodeURIComponent(bedId)}`);
+  _activeLotsByBed.set(bedId, lots || []);
+  return lots || [];
+}
+
+function _lotLabel(lot) {
+  return `${lot.crops?.name || 'Cultivo'} · ${lot.lot_id} · ${lot.date}${lot.location_note ? ` · ${lot.location_note}` : ''}`;
+}
+
+function _lotOpts(bedId, selectedId = '', cropId = '') {
+  const lots = _activeLotsByBed.get(bedId) || [];
+  const filtered = cropId ? lots.filter(lot => lot.crop_id === cropId) : lots;
+  return `<option value="">${bedId ? (filtered.length ? '— Lote activo —' : '— No hay lotes activos —') : '— Seleccioná la cama —'}</option>${filtered.map(lot => `<option value="${lot.id}" ${lot.id === selectedId ? 'selected' : ''}>${_lotLabel(lot)}</option>`).join('')}`;
+}
 
 // Sólo algunas áreas tienen subáreas (ej: SAF Canelo, SAF Basecamp, Huerta, Basecamp Atrás);
 // Ojoche y Vivero Greens no las tienen — el select queda vacío en ese caso.
@@ -384,7 +403,7 @@ function _renderApplyBedRows() {
     <div style="display:flex;gap:.5rem;align-items:center;margin-bottom:.5rem;">
       <select style="flex:1;background:white;border:1px solid rgba(84,66,54,.2);border-radius:8px;
                      padding:.6rem .65rem;font-size:.82rem;font-family:sans-serif;color:var(--brown);outline:none;"
-              id="ab-bed-${i}" onchange="window._fab(${i},'bed_id',this.value)">
+              id="ab-bed-${i}" onchange="window._fab(${i},'bed_id',this.value); window._foodRefreshApplyLots()">
         ${_bedOptsByArea(areaId, subareaId, '— Cama —')}
       </select>
       <button onclick="removeApplyBedRow(${i})"
@@ -417,7 +436,7 @@ function _renderMaintBedRows() {
     <div style="display:flex;gap:.5rem;align-items:center;margin-bottom:.5rem;">
       <select style="flex:1;background:white;border:1px solid rgba(84,66,54,.2);border-radius:8px;
                      padding:.6rem .65rem;font-size:.82rem;font-family:sans-serif;color:var(--brown);outline:none;"
-              id="mb-bed-${i}" onchange="window._fmb(${i},'bed_id',this.value)">
+              id="mb-bed-${i}" onchange="window._fmb(${i},'bed_id',this.value); window._foodRefreshMaintLots()">
         ${_bedOptsByArea(areaId, subareaId, '— Cama —')}
       </select>
       <button onclick="removeMaintBedRow(${i})"
@@ -432,7 +451,7 @@ function _renderMaintBedRows() {
 // ─── HARVEST ROWS ──────────────────────────────────────────────────────────
 
 export function addHarvestRow() {
-  _harvestRows.push({ crop_id: '', area_id: '', subarea_id: '', bed_id: '', qty: '', unit: '' });
+  _harvestRows.push({ crop_id: '', area_id: '', subarea_id: '', bed_id: '', planting_id: '', qty: '', unit: '' });
   _renderHarvestRows();
 }
 
@@ -478,8 +497,15 @@ function _renderHarvestRows() {
       <div class="fg" style="margin-bottom:.55rem;">
         <select style="width:100%;background:white;border:1px solid rgba(84,66,54,.2);border-radius:8px;
                        padding:.6rem .6rem;font-size:.8rem;font-family:sans-serif;color:var(--brown);outline:none;"
-                id="hr-bed-${i}" onchange="window._fhr(${i},'bed_id',this.value)">
+                id="hr-bed-${i}" onchange="window._fhr(${i},'bed_id',this.value); window._foodHarvestBedChanged(${i})">
           <option value="">— Cama —</option>
+        </select>
+      </div>
+      <div class="fg" style="margin-bottom:.55rem;">
+        <label style="font-size:.7rem;">Lote de siembra</label>
+        <select style="width:100%;background:white;border:1px solid rgba(84,66,54,.2);border-radius:8px;padding:.6rem .6rem;font-size:.8rem;font-family:sans-serif;color:var(--brown);outline:none;"
+                id="hr-lot-${i}" onchange="window._foodHarvestLotChanged(${i},this.value)">
+          ${_lotOpts(row.bed_id, row.planting_id, row.crop_id)}
         </select>
       </div>
       <div style="display:flex;gap:.5rem;">
@@ -507,6 +533,7 @@ function _renderHarvestRows() {
         b.innerHTML = _bedOptsByArea(row.area_id, row.subarea_id || '', '— Cama —');
         if (row.bed_id) _ensureBedOption(`hr-bed-${i}`, row.bed_id);
       }
+      if (row.bed_id && !_activeLotsByBed.has(row.bed_id)) _activeLotsForBed(row.bed_id).then(() => _renderHarvestRows());
     }
     const cropEl = document.getElementById(`hr-crop-${i}`);
     if (cropEl && row.crop_id) cropEl.value = row.crop_id;
@@ -716,6 +743,11 @@ const FORMS = {
         </div>
         <div id="f-density-err" style="display:none;color:var(--clay);font-size:.7rem;font-family:sans-serif;margin-top:.35rem;">Solo se pueden ingresar números.</div>
       </div>
+      <div class="fg"><label>Fecha objetivo de establecimiento</label>
+        <div class="doc-note" style="margin-bottom:.35rem;">Se propone 21 días después de la siembra. Ajustala si este cultivo requiere más o menos tiempo.</div>
+        <input type="date" id="f-establishment-due"></div>
+      <div class="fg"><label>Ubicación dentro de la cama <span style="font-weight:normal;color:var(--tm);">(opcional)</span></label>
+        <input type="text" id="f-location-note" placeholder="Ej.: primera mitad de la cama, dos filas lado norte"></div>
       ${_workersField()}
       <div class="fg"><label>Observaciones</label>${_aw('obs', 'Observaciones o dicta nota de voz...')}</div>
       ${photoUploadWidget('food-photos')}`,
@@ -724,6 +756,7 @@ const FORMS = {
       const bedSel = document.getElementById('f-bed');
       if (bedSel) bedSel.innerHTML = _bedOptsByArea('');
       window._foodMaterialUnit();
+      window._foodSetEstablishmentDue();
     },
   },
 
@@ -777,6 +810,7 @@ const FORMS = {
         [['area','Toda el área'], ['beds','Camas específicas']],
         'window._foodApplyScope')}
       <div id="apply-scope-content" style="margin-top:-.4rem;margin-bottom:.5rem;"></div>
+      <div id="apply-lots-preview" style="margin-bottom:.7rem;"></div>
       <div class="fg">
         <label>Insumos biológicos aplicados</label>
         <div class="doc-note" style="margin-bottom:.6rem;">
@@ -831,6 +865,7 @@ const FORMS = {
           <button type="button" onclick="addMaintBedRow()" class="add-row-btn">+ Agregar cama</button>
         </div>
       </div>
+      <div id="maint-lots-preview" style="margin-bottom:.7rem;"></div>
       <div class="fg">
         <label>Actividad realizada</label>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:.3rem .7rem;margin-top:.35rem;">
@@ -1008,6 +1043,132 @@ function _setVal(id, val) {
   if (el && val !== undefined && val !== null) el.value = val;
 }
 
+function _isFoodAdmin() {
+  return state.currentUser?.profile?.role === 'admin';
+}
+
+export async function openPlantingTracking() {
+  await _loadCats();
+  document.getElementById('ft').textContent = 'Seguimiento de Siembra';
+  document.getElementById('fs-back').onclick = () => openFood();
+  document.getElementById('fbody').innerHTML = `<div style="font-size:.8rem;font-family:sans-serif;color:var(--tm);font-style:italic;">Cargando lotes...</div>`;
+  show('fs');
+  try {
+    const lots = await _api('/api/food/planting-lots');
+    const due = lots.filter(lot => lot.establishment_due_date && lot.establishment_due_date <= new Date().toISOString().slice(0, 10));
+    const lotCards = _isFoodAdmin() ? lots.slice(0, 12).map(lot => `
+      <button class="gcard" style="width:100%;text-align:left;margin-bottom:.55rem;" onclick="openPlantingLotDetail('${lot.id}')">
+        <div class="ct">${_lotLabel(lot)}</div><div class="cd">${lot.establishment_due_date ? `Establecimiento: ${lot.establishment_due_date}` : 'Sin fecha objetivo'}</div>
+      </button>`).join('') : '';
+    document.getElementById('fbody').innerHTML = `
+      <h2 style="font-size:1.05rem;font-weight:normal;font-style:italic;color:var(--brown);margin-bottom:1rem;">Seguimiento de Siembra</h2>
+      ${due.length ? `<div class="doc-note" style="margin-bottom:1rem;"><strong>${due.length} lote(s)</strong> tienen su conteo de establecimiento pendiente o vencido.</div>` : ''}
+      <div class="grid" style="margin-bottom:1rem;">
+        <div class="gcard" onclick="openPlantingLotAction('followup')"><div class="ct">🌱 Registrar seguimiento</div><div class="cd">Establecimiento, conteo, observación o incidencia</div></div>
+        <div class="gcard" onclick="openPlantingLotAction('close')"><div class="ct">🏁 Cerrar lote</div><div class="cd">Fin de ciclo o pérdida total</div></div>
+      </div>
+      ${_isFoodAdmin() ? `<div class="divider"></div><div class="glbl">Lotes activos</div>${lotCards || '<div class="doc-note">No hay lotes activos.</div>'}` : '<div class="doc-note">Seleccioná el lote por ubicación para registrar una actividad. El detalle productivo está disponible para administradores.</div>'}`;
+  } catch (e) {
+    document.getElementById('fbody').innerHTML = `<div class="doc-note" style="color:#c0392b;">${e.message}</div>`;
+  }
+}
+
+export async function openPlantingLotAction(action, lot = null) {
+  await _loadCats();
+  const isClose = action === 'close';
+  document.getElementById('ft').textContent = isClose ? 'Cerrar Lote de Siembra' : 'Registrar Seguimiento';
+  document.getElementById('fs-back').onclick = () => openPlantingTracking();
+  document.getElementById('fbody').innerHTML = `
+    <h2 style="font-size:1.05rem;font-weight:normal;font-style:italic;color:var(--brown);margin-bottom:1rem;">${isClose ? 'Cerrar lote' : 'Seguimiento de siembra'}</h2>
+    <div class="fg"><label>Fecha</label><input type="date" id="lot-date"></div>
+    <div class="fg"><label>Área</label><select id="lot-area" onchange="window._foodLotAreaChanged()">${_areaOpts()}</select></div>
+    <div class="fg"><label>Subárea</label><select id="lot-sub" onchange="window._foodLotSubareaChanged()"><option value="">— Seleccioná el área primero —</option></select></div>
+    <div class="fg"><label>Cama</label><select id="lot-bed" onchange="window._foodLotBedChanged()"><option value="">— Seleccioná el área primero —</option></select></div>
+    <div class="fg"><label>Lote activo</label><select id="lot-id"><option value="">— Seleccioná la cama —</option></select></div>
+    ${isClose ? `
+      <div class="fg"><label>Resultado</label><select id="lot-status"><option value="closed">Fin de ciclo</option><option value="lost">Pérdida total</option></select></div>
+      <div class="fg"><label>Motivo</label><input type="text" id="lot-reason" placeholder="Ej.: ciclo terminado, daño por plaga"></div>` : `
+      <div class="fg"><label>Tipo de seguimiento</label><select id="lot-event"><option value="establishment">Conteo de establecimiento</option><option value="count">Conteo posterior</option><option value="observation">Observación</option><option value="incident">Incidencia / enfermedad</option></select></div>
+      <div class="fg"><label>Plantas vivas <span style="font-weight:normal;color:var(--tm);">(si hiciste un conteo)</span></label><input type="number" min="0" id="lot-live-count"></div>
+      <div class="fg"><label>Etapa de crecimiento</label><input type="text" id="lot-stage" placeholder="Ej.: establecimiento, vegetativo, floración"></div>
+      <div class="fg"><label>Estado de salud</label><select id="lot-health"><option value="healthy">Saludable</option><option value="attention">Requiere atención</option><option value="critical">Crítico</option></select></div>
+      <div class="fg"><label>Problema / enfermedad <span style="font-weight:normal;color:var(--tm);">(opcional)</span></label><input type="text" id="lot-issue" placeholder="Ej.: mildiu, daño de insectos"></div>
+      <div class="fg"><label>Acciones tomadas</label><input type="text" id="lot-actions" placeholder="Ej.: se retiraron hojas afectadas"></div>`}
+    <div class="fg"><label>Observaciones</label>${_aw('lot-obs', 'Notas importantes del lote...')}</div>
+    <button class="btn-sub" onclick="submitPlantingLotAction('${action}')">Guardar</button>
+    <div id="lot-action-err" style="display:none;color:#c0392b;font-size:.8rem;font-family:sans-serif;margin-top:.8rem;"></div>`;
+  document.getElementById('lot-date').value = new Date().toISOString().slice(0, 10);
+  if (lot?.beds) {
+    document.getElementById('lot-area').value = lot.beds.area_id || '';
+    window._foodLotAreaChanged();
+    document.getElementById('lot-sub').value = lot.beds.subarea_id || '';
+    window._foodLotSubareaChanged();
+    document.getElementById('lot-bed').value = lot.bed_id;
+    await window._foodLotBedChanged();
+    document.getElementById('lot-id').value = lot.id;
+  }
+  show('fs');
+}
+
+export async function submitPlantingLotAction(action) {
+  const lotId = document.getElementById('lot-id')?.value;
+  const date = document.getElementById('lot-date')?.value;
+  const error = document.getElementById('lot-action-err');
+  try {
+    if (!lotId || !date) throw new Error('Seleccioná ubicación, lote y fecha.');
+    if (action === 'close') {
+      await _api(`/api/food/planting-lots/${lotId}/status`, 'PATCH', {
+        date, status: document.getElementById('lot-status').value,
+        reason: document.getElementById('lot-reason').value.trim() || null,
+        observations: _buildObs('lot-obs'),
+      });
+    } else {
+      const live = document.getElementById('lot-live-count').value;
+      const event_type = document.getElementById('lot-event').value;
+      if (event_type === 'establishment' && live === '') throw new Error('El conteo de establecimiento requiere plantas vivas.');
+      await _api(`/api/food/planting-lots/${lotId}/followups`, 'POST', {
+        date, event_type,
+        live_count: live === '' ? null : parseInt(live, 10),
+        growth_stage: document.getElementById('lot-stage').value.trim() || null,
+        health_status: document.getElementById('lot-health').value,
+        issue_type: document.getElementById('lot-issue').value.trim() || null,
+        actions_taken: document.getElementById('lot-actions').value.trim() || null,
+        observations: _buildObs('lot-obs'),
+      });
+    }
+    _activeLotsByBed.clear();
+    openPlantingTracking();
+  } catch (e) {
+    error.textContent = e.message;
+    error.style.display = 'block';
+  }
+}
+
+export async function openPlantingLotDetail(id) {
+  if (!_isFoodAdmin()) return;
+  document.getElementById('ft').textContent = 'Detalle de Lote';
+  document.getElementById('fs-back').onclick = () => openPlantingTracking();
+  document.getElementById('fbody').innerHTML = `<div class="doc-note">Cargando detalle...</div>`;
+  show('fs');
+  try {
+    const detail = await _api(`/api/food/planting-lots/${id}`);
+    const { lot, metrics, followups, harvests } = detail;
+    document.getElementById('fbody').innerHTML = `
+      <h2 style="font-size:1.05rem;font-weight:normal;font-style:italic;color:var(--brown);margin-bottom:.4rem;">${_lotLabel(lot)}</h2>
+      <div class="doc-note" style="margin-bottom:1rem;">Estado: <strong>${lot.status}</strong> · Establecimiento objetivo: ${lot.establishment_due_date || 'sin fecha'}</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.55rem;margin-bottom:1rem;">
+        ${[['Establecimiento', metrics.establishment_count ?? '—'], ['Vivas (último conteo)', metrics.latest_live_count ?? '—'], ['Mortalidad', metrics.mortality_rate == null ? '—' : `${(metrics.mortality_rate * 100).toFixed(1)}%`], ['Costo bioinsumos estimado', `₡${Number(metrics.estimated_input_cost || 0).toLocaleString('es-CR')}`], ['Cosecha total', metrics.total_harvest]].map(([l,v]) => `<div style="background:white;border:1px solid rgba(84,66,54,.12);border-radius:9px;padding:.65rem;"><div style="font-size:.64rem;color:var(--tm);font-family:sans-serif;">${l}</div><div style="font-size:.95rem;color:var(--brown);font-family:sans-serif;margin-top:.2rem;">${v}</div></div>`).join('')}
+      </div>
+      <button class="btn-sub" style="margin-bottom:.7rem;" onclick="openPlantingLotAction('followup')">Registrar seguimiento</button>
+      <div class="glbl">Historial</div>
+      ${(followups || []).map(item => `<div class="doc-note" style="margin:.45rem 0;"><strong>${item.event_type}</strong> · ${item.date}${item.live_count != null ? ` · ${item.live_count} plantas` : ''}${item.issue_type ? ` · ${item.issue_type}` : ''}</div>`).join('') || '<div class="doc-note">Sin seguimientos todavía.</div>'}
+      <div class="glbl" style="margin-top:1rem;">Cosechas</div>
+      ${(harvests || []).map(item => `<div class="doc-note" style="margin:.45rem 0;">${item.date} · ${item.real_quantity} ${item.unit}</div>`).join('') || '<div class="doc-note">Sin cosechas vinculadas.</div>'}`;
+  } catch (e) {
+    document.getElementById('fbody').innerHTML = `<div class="doc-note" style="color:#c0392b;">${e.message}</div>`;
+  }
+}
+
 async function _finalizeFoodTask(recordId, successBaseText = null) {
   const okTxt = document.getElementById('food-ok-txt');
   if (okTxt && successBaseText) okTxt.textContent = successBaseText;
@@ -1028,6 +1189,37 @@ function _findBedsByCodes(codes = [], areaId = '') {
   ).filter(Boolean);
 }
 
+function _targetBedIds(areaId, subareaId, scope, selectedRows) {
+  if (scope === 'beds') return [...new Set((selectedRows || []).map(row => row.bed_id).filter(Boolean))];
+  return (_cats?.beds || []).filter(b => b.area_id === areaId && (!subareaId || b.subarea_id === subareaId)).map(b => b.id);
+}
+
+async function _refreshDetectedLots(kind) {
+  const preview = document.getElementById(`${kind}-lots-preview`);
+  if (!preview) return;
+  const areaId = document.getElementById('f-area')?.value || '';
+  const subareaId = document.getElementById('f-subarea')?.value || '';
+  const scope = kind === 'apply' ? _applyScope : _maintScope;
+  const rows = kind === 'apply' ? _applyBedRows : _maintBedRows;
+  const bedIds = _targetBedIds(areaId, subareaId, scope, rows);
+  if (!bedIds.length) {
+    preview.innerHTML = '';
+    return;
+  }
+  preview.innerHTML = `<div class="doc-note">Buscando lotes activos...</div>`;
+  const lotGroups = await Promise.all(bedIds.map(_activeLotsForBed));
+  const lots = [...new Map(lotGroups.flat().map(lot => [lot.id, lot])).values()];
+  preview.innerHTML = lots.length ? `
+    <div class="doc-note" style="margin-top:.2rem;"><strong>Lotes detectados automáticamente</strong><br><span style="font-size:.7rem;">Se vincularán al registro. Desmarcá solo los que no recibieron esta actividad.</span></div>
+    <div style="max-height:9rem;overflow:auto;background:white;border:1px solid rgba(84,66,54,.12);border-radius:8px;padding:.2rem .65rem;">
+      ${lots.map(lot => `<label style="display:flex;gap:.45rem;padding:.45rem 0;font-size:.76rem;font-family:sans-serif;color:var(--brown);"><input type="checkbox" name="${kind}-lot" value="${lot.id}" checked> ${_lotLabel(lot)}</label>`).join('')}
+    </div>` : `<div class="doc-note">No se detectaron lotes activos en el ámbito seleccionado.</div>`;
+}
+
+function _selectedDetectedLotIds(kind) {
+  return [...document.querySelectorAll(`input[name="${kind}-lot"]:checked`)].map(input => input.value);
+}
+
 function _prefillFoodForm(type, record) {
   _setVal('f-fecha', record.date);
   const beds = _cats?.beds || [];
@@ -1040,6 +1232,8 @@ function _prefillFoodForm(type, record) {
       _setVal('f-material', record.material_type || '');
       window._foodMaterialUnit();
       _setVal('f-density', record.quantity_density ?? '');
+      _setVal('f-establishment-due', record.establishment_due_date || '');
+      _setVal('f-location-note', record.location_note || '');
       _setVal('ta-obs', record.observations || '');
       break;
     }
@@ -1106,7 +1300,7 @@ function _prefillFoodForm(type, record) {
 
     case 'cosecha': {
       _harvestRows = [{
-        crop_id: record.crop_id, area_id: record.area_id, subarea_id: '', bed_id: record.bed_id,
+        crop_id: record.crop_id, area_id: record.area_id, subarea_id: '', bed_id: record.bed_id, planting_id: record.planting_id || '',
         qty: String(record.real_quantity), unit: record.unit || '',
       }];
       _renderHarvestRows();
@@ -1168,6 +1362,8 @@ export async function submitFoodForm() {
           date, bed_id, crop_id,
           material_type: material || null,
           quantity_density: density ? parseFloat(density) : null,
+          establishment_due_date: document.getElementById('f-establishment-due')?.value || null,
+          location_note: document.getElementById('f-location-note')?.value?.trim() || null,
           observations: obs,
           photo_urls,
         };
@@ -1218,6 +1414,7 @@ export async function submitFoodForm() {
       case 'aplic-insumos': {
         const area_id = document.getElementById('f-area')?.value;
         if (!area_id) throw new Error('Seleccioná el área.');
+        const subarea_id = document.getElementById('f-subarea')?.value || '';
         const method = document.getElementById('f-method')?.value || null;
         const totalLiquidRaw = document.getElementById('f-total-liquid')?.value;
         const totalLiquid    = totalLiquidRaw ? parseFloat(totalLiquidRaw) : null;
@@ -1246,6 +1443,8 @@ export async function submitFoodForm() {
             total_liquid_quantity: totalLiquid,
             performed_by: userId, created_by: userId,
             observations: fullObs, items, photo_urls,
+            target_bed_ids: _targetBedIds(area_id, subarea_id, _applyScope, _applyBedRows),
+            planting_ids: _selectedDetectedLotIds('apply'),
           });
           await _finalizeFoodTask(extractRecordId(created), '✅ Aplicación registrada correctamente.');
         }
@@ -1286,6 +1485,8 @@ export async function submitFoodForm() {
         } else {
           const created = await _api('/api/food/area-maintenance', 'POST', {
             ...maintFields, performed_by: userId, created_by: userId,
+            target_bed_ids: _targetBedIds(area_id, document.getElementById('f-subarea')?.value || '', _maintScope, _maintBedRows),
+            planting_ids: _selectedDetectedLotIds('maint'),
           });
           await _finalizeFoodTask(extractRecordId(created), '✅ Mantenimiento registrado correctamente.');
         }
@@ -1329,13 +1530,13 @@ export async function submitFoodForm() {
       }
 
       case 'cosecha': {
-        const validRows = _harvestRows.filter(r => r.crop_id && r.area_id && r.bed_id && r.qty && r.unit);
-        if (!validRows.length) throw new Error('Completá al menos una fila con cultivo, área, cama, cantidad y unidad.');
+        const validRows = _harvestRows.filter(r => r.crop_id && r.area_id && r.bed_id && r.planting_id && r.qty && r.unit);
+        if (!validRows.length) throw new Error('Completá al menos una fila con cultivo, área, cama, lote, cantidad y unidad.');
 
         if (_editing) {
           const r = validRows[0];
           await _api(`/api/food/harvests/${_editing.id}`, 'PATCH', {
-            date, crop_id: r.crop_id, area_id: r.area_id, bed_id: r.bed_id,
+            date, crop_id: r.crop_id, area_id: r.area_id, bed_id: r.bed_id, planting_id: r.planting_id,
             real_quantity: parseFloat(r.qty), unit: r.unit, observations: obs, photo_urls,
           });
           okEl.style.display = 'block';
@@ -1346,6 +1547,7 @@ export async function submitFoodForm() {
             crop_id: r.crop_id,
             area_id: r.area_id,
             bed_id: r.bed_id,
+            planting_id: r.planting_id,
             real_quantity: parseFloat(r.qty),
             unit: r.unit,
             performed_by: userId,
@@ -1388,6 +1590,64 @@ window._fpb = (i, key, val) => { if (_prepBedRows[i]) _prepBedRows[i][key] = val
 window._fab = (i, key, val) => { if (_applyBedRows[i])_applyBedRows[i][key]= val; };
 window._fhr = (i, key, val) => { if (_harvestRows[i]) _harvestRows[i][key] = val; };
 
+window._foodHarvestBedChanged = async (i) => {
+  const row = _harvestRows[i];
+  if (!row?.bed_id) return;
+  row.planting_id = '';
+  await _activeLotsForBed(row.bed_id);
+  _renderHarvestRows();
+};
+
+window._foodHarvestLotChanged = (i, lotId) => {
+  const row = _harvestRows[i];
+  const lot = (_activeLotsByBed.get(row?.bed_id) || []).find(item => item.id === lotId);
+  if (!row) return;
+  row.planting_id = lotId;
+  if (lot) {
+    row.crop_id = lot.crop_id;
+    const crop = (_cats?.crops || []).find(item => item.id === lot.crop_id);
+    if (crop?.harvest_unit) row.unit = crop.harvest_unit;
+    _renderHarvestRows();
+  }
+};
+
+window._foodSetEstablishmentDue = () => {
+  const date = document.getElementById('f-fecha')?.value;
+  const due = document.getElementById('f-establishment-due');
+  if (!date || !due || due.value) return;
+  const target = new Date(`${date}T00:00:00Z`);
+  target.setUTCDate(target.getUTCDate() + 21);
+  due.value = target.toISOString().slice(0, 10);
+};
+
+window._foodLotAreaChanged = () => {
+  const areaId = document.getElementById('lot-area')?.value || '';
+  const sub = document.getElementById('lot-sub');
+  if (sub) sub.innerHTML = _subareaOptsByArea(areaId);
+  const bed = document.getElementById('lot-bed');
+  if (bed) bed.innerHTML = _bedOptsByArea(areaId, '', '— Cama —');
+  const lot = document.getElementById('lot-id');
+  if (lot) lot.innerHTML = '<option value="">— Seleccioná la cama —</option>';
+};
+
+window._foodLotSubareaChanged = () => {
+  const areaId = document.getElementById('lot-area')?.value || '';
+  const subareaId = document.getElementById('lot-sub')?.value || '';
+  const bed = document.getElementById('lot-bed');
+  if (bed) bed.innerHTML = _bedOptsByArea(areaId, subareaId, '— Cama —');
+  const lot = document.getElementById('lot-id');
+  if (lot) lot.innerHTML = '<option value="">— Seleccioná la cama —</option>';
+};
+
+window._foodLotBedChanged = async () => {
+  const bedId = document.getElementById('lot-bed')?.value;
+  const lotSel = document.getElementById('lot-id');
+  if (!lotSel) return;
+  lotSel.innerHTML = '<option value="">Cargando lotes...</option>';
+  await _activeLotsForBed(bedId);
+  lotSel.innerHTML = _lotOpts(bedId);
+};
+
 // Cascading area (+ optional subarea) → bed filter
 window._foodFilterBeds = (bedSelId, areaId, subareaId = '') => {
   const sel = document.getElementById(bedSelId);
@@ -1423,12 +1683,14 @@ window._foodApplyAreaChanged = () => {
     subSel.value = '';
   }
   window._foodApplyScopeAreaChanged();
+  window._foodRefreshApplyLots();
 };
 
 // Also update apply-bed rows when area/subarea changes in aplic-insumos
 window._foodApplyScopeAreaChanged = () => {
   _applyBedRows = [];
   _renderApplyBedRows();
+  window._foodRefreshApplyLots();
 };
 
 // Area select changed in mantenimiento → repopulate subarea, then refresh bed rows
@@ -1441,16 +1703,19 @@ window._foodMaintAreaChanged = () => {
   }
   _maintBedRows = [];
   _renderMaintBedRows();
+  window._foodRefreshMaintLots();
 };
 
 window._foodMaintScopeAreaChanged = () => {
   _renderMaintBedRows();
+  window._foodRefreshMaintLots();
 };
 
 // Scope toggles
 window._foodApplyScope = (scope) => {
   _applyScope = scope;
   _updateApplyScopeUI();
+  window._foodRefreshApplyLots();
 };
 
 window._foodMaintScope = (scope) => {
@@ -1462,7 +1727,11 @@ window._foodMaintScope = (scope) => {
     if (!_maintBedRows.length) addMaintBedRow();
     else _renderMaintBedRows();
   }
+  window._foodRefreshMaintLots();
 };
+
+window._foodRefreshApplyLots = () => { _refreshDetectedLots('apply').catch(() => {}); };
+window._foodRefreshMaintLots = () => { _refreshDetectedLots('maint').catch(() => {}); };
 
 // New crop inline toggle
 window._foodNewCropToggle = () => {

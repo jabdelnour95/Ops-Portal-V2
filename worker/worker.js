@@ -437,12 +437,137 @@ const FOOD_LIST_SELECT = {
   harvests: 'select=*,crops(name),productive_areas(name),beds(code)&',
 };
 
+async function _activePlantingsForBeds(env, bedIds, date) {
+  const ids = [...new Set((bedIds || []).filter(Boolean))];
+  if (!ids.length) return [];
+  const params = `bed_id=in.(${ids.join(',')})&status=eq.active&date=lte.${date}&select=id`;
+  const res = await sbGet(env, 'plantings', params);
+  if (!res.ok) return [];
+  return res.json();
+}
+
+async function _savePlantingLinks(env, table, parentColumn, parentId, plantingIds) {
+  const ids = [...new Set((plantingIds || []).filter(Boolean))];
+  if (!ids.length) return;
+  await sbPost(env, table, ids.map(planting_id => ({ [parentColumn]: parentId, planting_id })));
+}
+
+async function _getPlantingLotDetail(env, plantingId) {
+  const [lotRes, followRes, statusRes, harvestRes, applicationRes, maintenanceRes] = await Promise.all([
+    sbGet(env, 'plantings', `id=eq.${plantingId}&select=*,crops(name,harvest_unit),beds(code,area_id,subarea_id)&limit=1`),
+    sbGet(env, 'planting_lot_followups', `planting_id=eq.${plantingId}&order=date.desc`),
+    sbGet(env, 'planting_lot_status_events', `planting_id=eq.${plantingId}&order=date.desc`),
+    sbGet(env, 'harvests', `planting_id=eq.${plantingId}&select=id,date,real_quantity,unit&order=date.desc`),
+    sbGet(env, 'input_application_plantings', `planting_id=eq.${plantingId}&select=input_applications(id,date,method,input_application_items(quantity,bio_finished_products(name,internal_price)))`),
+    sbGet(env, 'area_maintenance_plantings', `planting_id=eq.${plantingId}&select=area_maintenance(id,date,maintenance_types,observations)`),
+  ]);
+  if (!lotRes.ok) return null;
+  const [lot] = await lotRes.json();
+  if (!lot) return null;
+  const [followups, status_events, harvests, application_links, maintenance_links] = await Promise.all([
+    followRes.json(), statusRes.json(), harvestRes.json(), applicationRes.json(), maintenanceRes.json(),
+  ]);
+  const counted = (followups || []).filter(item => item.live_count !== null && item.live_count !== undefined).sort((a, b) => a.date.localeCompare(b.date));
+  const baseline = counted.find(item => item.event_type === 'establishment') || null;
+  const latestCount = counted.at(-1) || null;
+  const totalHarvest = (harvests || []).reduce((sum, item) => sum + Number(item.real_quantity || 0), 0);
+  const applicationIds = (application_links || []).map(link => link.input_applications?.id).filter(Boolean);
+  const countRes = applicationIds.length
+    ? await sbGet(env, 'input_application_plantings', `application_id=in.(${applicationIds.join(',')})&select=application_id`)
+    : null;
+  const allApplicationLinks = countRes?.ok ? await countRes.json() : [];
+  const lotsPerApplication = (allApplicationLinks || []).reduce((counts, link) => {
+    counts[link.application_id] = (counts[link.application_id] || 0) + 1;
+    return counts;
+  }, {});
+  const estimatedInputCost = (application_links || []).reduce((sum, link) => {
+    const items = link.input_applications?.input_application_items || [];
+    const count = lotsPerApplication[link.input_applications?.id] || 1;
+    return sum + items.reduce((itemSum, item) => itemSum + (Number(item.quantity || 0) * Number(item.bio_finished_products?.internal_price || 0)) / count, 0);
+  }, 0);
+  return {
+    lot,
+    followups: followups || [],
+    status_events: status_events || [],
+    harvests: harvests || [],
+    applications: application_links || [],
+    maintenance: maintenance_links || [],
+    metrics: {
+      establishment_count: baseline?.live_count ?? null,
+      latest_live_count: latestCount?.live_count ?? null,
+      mortality_rate: baseline && latestCount ? Math.max(0, (Number(baseline.live_count) - Number(latestCount.live_count)) / Number(baseline.live_count)) : null,
+      total_harvest: totalHarvest,
+      estimated_input_cost: estimatedInputCost,
+    },
+  };
+}
+
 async function handleFood(request, env, auth) {
   const segments = new URL(request.url).pathname.split('/').filter(Boolean);
   // segments: ['api', 'food', ':resource', ':id?', ':action?']
   const resource = segments[2];
   const itemId = segments[3];
   const action = segments[4];
+
+  // ── planting lots: worker forms can list active lots; detail is admin-only.
+  if (resource === 'planting-lots') {
+    if (!itemId && request.method === 'GET') {
+      const url = new URL(request.url);
+      const bedId = url.searchParams.get('bed_id');
+      const onlyDue = url.searchParams.get('establishment_due') === 'true';
+      const filters = ['status=eq.active'];
+      if (bedId) filters.push(`bed_id=eq.${bedId}`);
+      if (onlyDue) filters.push(`establishment_due_date=lte.${new Date().toISOString().slice(0, 10)}`);
+      const res = await sbGet(env, 'plantings', `${filters.join('&')}&select=*,crops(name),beds(code,area_id,subarea_id)&order=date.desc`);
+      return proxySb(request, res);
+    }
+
+    if (itemId && !action && request.method === 'GET') {
+      const forbidden = requireAdmin(request, auth); if (forbidden) return forbidden;
+      const detail = await _getPlantingLotDetail(env, itemId);
+      return detail ? okResponse(request, detail) : errResponse(request, 'NOT_FOUND', 'Lote no encontrado', 404);
+    }
+
+    if (itemId && action === 'followups' && request.method === 'POST') {
+      const body = await request.json();
+      if (!body.date || !body.event_type) return errResponse(request, 'VALIDATION_ERROR', 'Fecha y tipo de seguimiento son obligatorios.', 400);
+      const res = await sbPost(env, 'planting_lot_followups', {
+        ...body,
+        planting_id: itemId,
+        performed_by: auth.userId,
+        created_by: auth.userId,
+      });
+      return proxySb(request, res);
+    }
+
+    if (itemId && action === 'status' && request.method === 'PATCH') {
+      const body = await request.json();
+      if (!['active', 'closed', 'lost'].includes(body.status) || !body.date) {
+        return errResponse(request, 'VALIDATION_ERROR', 'Estado y fecha válidos son obligatorios.', 400);
+      }
+      const currentRes = await sbGet(env, 'plantings', `id=eq.${itemId}&select=status&limit=1`);
+      const [current] = await currentRes.json();
+      if (!current) return errResponse(request, 'NOT_FOUND', 'Lote no encontrado', 404);
+      const fields = {
+        status: body.status,
+        closed_at: body.status === 'active' ? null : new Date().toISOString(),
+        closed_by: body.status === 'active' ? null : auth.userId,
+        closure_reason: body.status === 'active' ? null : (body.reason || null),
+      };
+      const updateRes = await sbPatch(env, 'plantings', `id=eq.${itemId}`, fields);
+      if (!updateRes.ok) return proxySb(request, updateRes);
+      await sbPost(env, 'planting_lot_status_events', {
+        planting_id: itemId,
+        date: body.date,
+        previous_status: current.status,
+        status: body.status,
+        reason: body.reason || null,
+        observations: body.observations || null,
+        performed_by: auth.userId,
+      });
+      return proxySb(request, updateRes);
+    }
+  }
 
   // ── bed-preparations (con array de inputs)
   if (resource === 'bed-preparations') {
@@ -514,13 +639,19 @@ async function handleFood(request, env, auth) {
         return proxySb(request, res);
       }
       if (request.method === 'POST') {
-        const { items = [], ...fields } = await request.json();
+        const { items = [], target_bed_ids = [], planting_ids = null, ...fields } = await request.json();
         const appRes = await sbPost(env, 'input_applications', fields);
         if (!appRes.ok) return proxySb(request, appRes);
         const app = (await appRes.json())[0];
         if (items.length) {
           await sbPost(env, 'input_application_items', items.map(i => ({ ...i, application_id: app.id })));
         }
+        const detected = await _activePlantingsForBeds(env, target_bed_ids, fields.date);
+        const detectedIds = detected.map(lot => lot.id);
+        const selectedIds = Array.isArray(planting_ids)
+          ? planting_ids.filter(id => detectedIds.includes(id))
+          : detectedIds;
+        await _savePlantingLinks(env, 'input_application_plantings', 'application_id', app.id, selectedIds);
         return okResponse(request, app, 201);
       }
     } else {
@@ -1034,6 +1165,21 @@ async function handleTasks(request, env, auth) {
     if (!res.ok) return proxySb(request, res);
     const rows = await res.json();
     return okResponse(request, await _attachTaskNames(env, rows));
+  }
+
+  // ── maintenance with automatic snapshot of active lots in the saved targets.
+  if (resource === 'area-maintenance' && !itemId && request.method === 'POST') {
+    const { target_bed_ids = [], planting_ids = null, ...fields } = await request.json();
+    const maintRes = await sbPost(env, 'area_maintenance', fields);
+    if (!maintRes.ok) return proxySb(request, maintRes);
+    const maintenance = (await maintRes.json())[0];
+    const detected = await _activePlantingsForBeds(env, target_bed_ids, fields.date);
+    const detectedIds = detected.map(lot => lot.id);
+    const selectedIds = Array.isArray(planting_ids)
+      ? planting_ids.filter(id => detectedIds.includes(id))
+      : detectedIds;
+    await _savePlantingLinks(env, 'area_maintenance_plantings', 'maintenance_id', maintenance.id, selectedIds);
+    return okResponse(request, maintenance, 201);
   }
 
   if (!itemId && request.method === 'POST') {

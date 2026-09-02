@@ -14,7 +14,8 @@ import { openFood, openFoodForm, submitFoodForm,
          addPrepBedRow, removePrepBedRow,
          addApplyBedRow, removeApplyBedRow,
          addMaintBedRow, removeMaintBedRow,
-         addHarvestRow, removeHarvestRow } from './modules/food.js';
+         addHarvestRow, removeHarvestRow,
+         openPlantingTracking, openPlantingLotAction, openPlantingLotDetail, submitPlantingLotAction } from './modules/food.js';
 import { openBio, openBioForm, submitBioForm,
          addBatchInputRow, removeBatchInputRow,
          openBioBatchPicker, openBioInventory } from './modules/bio.js';
@@ -46,6 +47,7 @@ Object.assign(window, {
   addApplyBedRow, removeApplyBedRow,
   addMaintBedRow, removeMaintBedRow,
   addHarvestRow, removeHarvestRow,
+  openPlantingTracking, openPlantingLotAction, openPlantingLotDetail, submitPlantingLotAction,
   // Biofactory module
   openBio, openBioForm, submitBioForm,
   addBatchInputRow, removeBatchInputRow,
