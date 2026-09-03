@@ -435,12 +435,17 @@ const FOOD_TABLE = {
 const FOOD_LIST_SELECT = {
   'area-maintenance': 'select=*,productive_areas(name)&',
   harvests: 'select=*,crops(name),productive_areas(name),beds(code)&',
+  plantings: 'select=*,crops(name),beds(code),planting_beds(bed_id,beds(code,area_id,subarea_id))&',
 };
 
 async function _activePlantingsForBeds(env, bedIds, date) {
   const ids = [...new Set((bedIds || []).filter(Boolean))];
   if (!ids.length) return [];
-  const params = `bed_id=in.(${ids.join(',')})&status=eq.active&date=lte.${date}&select=id`;
+  const bedRes = await sbGet(env, 'planting_beds', `bed_id=in.(${ids.join(',')})&select=planting_id`);
+  if (!bedRes.ok) return [];
+  const plantingIds = [...new Set((await bedRes.json()).map(row => row.planting_id))];
+  if (!plantingIds.length) return [];
+  const params = `id=in.(${plantingIds.join(',')})&status=eq.active&date=lte.${date}&select=id`;
   const res = await sbGet(env, 'plantings', params);
   if (!res.ok) return [];
   return res.json();
@@ -453,8 +458,9 @@ async function _savePlantingLinks(env, table, parentColumn, parentId, plantingId
 }
 
 async function _getPlantingLotDetail(env, plantingId) {
-  const [lotRes, followRes, statusRes, harvestRes, applicationRes, maintenanceRes] = await Promise.all([
+  const [lotRes, bedsRes, followRes, statusRes, harvestRes, applicationRes, maintenanceRes] = await Promise.all([
     sbGet(env, 'plantings', `id=eq.${plantingId}&select=*,crops(name,harvest_unit),beds(code,area_id,subarea_id)&limit=1`),
+    sbGet(env, 'planting_beds', `planting_id=eq.${plantingId}&select=bed_id,beds(code,area_id,subarea_id)`),
     sbGet(env, 'planting_lot_followups', `planting_id=eq.${plantingId}&order=date.desc`),
     sbGet(env, 'planting_lot_status_events', `planting_id=eq.${plantingId}&order=date.desc`),
     sbGet(env, 'harvests', `planting_id=eq.${plantingId}&select=id,date,real_quantity,unit&order=date.desc`),
@@ -464,8 +470,8 @@ async function _getPlantingLotDetail(env, plantingId) {
   if (!lotRes.ok) return null;
   const [lot] = await lotRes.json();
   if (!lot) return null;
-  const [followups, status_events, harvests, application_links, maintenance_links] = await Promise.all([
-    followRes.json(), statusRes.json(), harvestRes.json(), applicationRes.json(), maintenanceRes.json(),
+  const [beds, followups, status_events, harvests, application_links, maintenance_links] = await Promise.all([
+    bedsRes.json(), followRes.json(), statusRes.json(), harvestRes.json(), applicationRes.json(), maintenanceRes.json(),
   ]);
   const counted = (followups || []).filter(item => item.live_count !== null && item.live_count !== undefined).sort((a, b) => a.date.localeCompare(b.date));
   const baseline = counted.find(item => item.event_type === 'establishment') || null;
@@ -487,6 +493,7 @@ async function _getPlantingLotDetail(env, plantingId) {
   }, 0);
   return {
     lot,
+    beds: beds || [],
     followups: followups || [],
     status_events: status_events || [],
     harvests: harvests || [],
@@ -516,8 +523,15 @@ async function handleFood(request, env, auth) {
       const bedId = url.searchParams.get('bed_id');
       const onlyDue = url.searchParams.get('establishment_due') === 'true';
       const filters = ['status=eq.active'];
-      if (bedId) filters.push(`bed_id=eq.${bedId}`);
       if (onlyDue) filters.push(`establishment_due_date=lte.${new Date().toISOString().slice(0, 10)}`);
+      let lotIds = null;
+      if (bedId) {
+        const bedRes = await sbGet(env, 'planting_beds', `bed_id=eq.${bedId}&select=planting_id`);
+        if (!bedRes.ok) return proxySb(request, bedRes);
+        lotIds = [...new Set((await bedRes.json()).map(row => row.planting_id))];
+        if (!lotIds.length) return okResponse(request, []);
+        filters.push(`id=in.(${lotIds.join(',')})`);
+      }
       const res = await sbGet(env, 'plantings', `${filters.join('&')}&select=*,crops(name),beds(code,area_id,subarea_id)&order=date.desc`);
       return proxySb(request, res);
     }
@@ -610,17 +624,33 @@ async function handleFood(request, env, auth) {
   if (resource === 'plantings') {
     if (!itemId) {
       if (request.method === 'GET') {
-        const res = await sbGet(env, 'plantings', 'select=*,crops(name),beds(code)&order=date.desc');
+        const res = await sbGet(env, 'plantings', 'select=*,crops(name),beds(code),planting_beds(bed_id,beds(code,area_id,subarea_id))&order=date.desc');
         return proxySb(request, res);
       }
       if (request.method === 'POST') {
-        const res = await sbPost(env, 'plantings', await request.json());
-        return proxySb(request, res);
+        const { bed_ids = [], ...fields } = await request.json();
+        const uniqueBeds = [...new Set([fields.bed_id, ...bed_ids].filter(Boolean))];
+        if (!uniqueBeds.length) return errResponse(request, 'VALIDATION_ERROR', 'Seleccioná al menos una cama.', 400);
+        const res = await sbPost(env, 'plantings', { ...fields, bed_id: uniqueBeds[0] });
+        if (!res.ok) return proxySb(request, res);
+        const planting = (await res.json())[0];
+        const linksRes = await sbPost(env, 'planting_beds', uniqueBeds.map(bed_id => ({ planting_id: planting.id, bed_id })));
+        if (!linksRes.ok) return proxySb(request, linksRes);
+        return okResponse(request, planting, 201);
       }
     } else {
       if (request.method === 'PATCH') {
         const forbidden = requireAdmin(request, auth); if (forbidden) return forbidden;
-        const res = await sbPatch(env, 'plantings', `id=eq.${itemId}`, await request.json());
+        const { bed_ids, ...fields } = await request.json();
+        if (bed_ids) {
+          const uniqueBeds = [...new Set(bed_ids.filter(Boolean))];
+          if (!uniqueBeds.length) return errResponse(request, 'VALIDATION_ERROR', 'Seleccioná al menos una cama.', 400);
+          fields.bed_id = uniqueBeds[0];
+          await sbDelete(env, 'planting_beds', `planting_id=eq.${itemId}`);
+          const linksRes = await sbPost(env, 'planting_beds', uniqueBeds.map(bed_id => ({ planting_id: itemId, bed_id })));
+          if (!linksRes.ok) return proxySb(request, linksRes);
+        }
+        const res = await sbPatch(env, 'plantings', `id=eq.${itemId}`, fields);
         return proxySb(request, res);
       }
       if (request.method === 'DELETE') {

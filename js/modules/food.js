@@ -16,6 +16,7 @@ let _activeLotsByBed = new Map();
 let _inputRows    = [];  // bio-product rows (prep-cama, aplic-insumos)
 let _availRows    = [];  // availability item rows
 let _prepBedRows  = [];  // multiple bed rows for prep-cama
+let _plantingBedRows = []; // multiple beds belonging to one planting lot
 let _applyBedRows = [];  // specific bed rows for aplic-insumos
 let _maintBedRows = [];  // specific bed rows for mantenimiento
 let _harvestRows  = [];  // one row per canasta in cosecha
@@ -415,6 +416,41 @@ function _renderApplyBedRows() {
   });
 }
 
+export function addPlantingBedRow() {
+  _plantingBedRows.push({ area_id: '', subarea_id: '', bed_id: '' });
+  _renderPlantingBedRows();
+}
+
+export function removePlantingBedRow(idx) {
+  _plantingBedRows.splice(idx, 1);
+  _renderPlantingBedRows();
+}
+
+function _renderPlantingBedRows() {
+  const el = document.getElementById('planting-bed-rows');
+  if (!el) return;
+  el.innerHTML = _plantingBedRows.map((row, i) => `
+    <div style="background:white;border:1px solid rgba(84,66,54,.1);border-radius:10px;padding:.6rem .65rem;margin-bottom:.5rem;">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:.5rem;">
+        <select id="plb-area-${i}" onchange="window._foodAreaChanged('plb-area-${i}','plb-sub-${i}','plb-bed-${i}'); window._flb(${i},'area_id',this.value)">${_areaOpts()}</select>
+        <select id="plb-sub-${i}" onchange="window._foodSubareaChanged('plb-area-${i}','plb-sub-${i}','plb-bed-${i}'); window._flb(${i},'subarea_id',this.value)"><option value="">— Seleccioná el área primero —</option></select>
+      </div>
+      <div style="display:flex;gap:.5rem;align-items:center;">
+        <select style="flex:1;" id="plb-bed-${i}" onchange="window._flb(${i},'bed_id',this.value)"><option value="">— Cama —</option></select>
+        <button onclick="removePlantingBedRow(${i})" style="background:none;border:none;color:var(--clay);font-size:1.25rem;cursor:pointer;padding:.05rem .3rem;line-height:1;">×</button>
+      </div>
+    </div>`).join('');
+  _plantingBedRows.forEach((row, i) => {
+    const area = document.getElementById(`plb-area-${i}`);
+    if (!area || !row.area_id) return;
+    area.value = row.area_id;
+    const sub = document.getElementById(`plb-sub-${i}`);
+    if (sub) { sub.innerHTML = _subareaOptsByArea(row.area_id); sub.value = row.subarea_id || ''; }
+    const bed = document.getElementById(`plb-bed-${i}`);
+    if (bed) { bed.innerHTML = _bedOptsByArea(row.area_id, row.subarea_id || '', '— Cama —'); if (row.bed_id) _ensureBedOption(`plb-bed-${i}`, row.bed_id); }
+  });
+}
+
 // ─── MAINT-BED ROWS (specific beds for mantenimiento) ─────────────────────
 
 export function addMaintBedRow() {
@@ -690,18 +726,10 @@ const FORMS = {
     build: () => `
       <div class="fg"><label>Fecha</label><input type="date" id="f-fecha"></div>
       <div class="fg">
-        <label>Área productiva</label>
-        <select id="f-area" onchange="window._foodAreaChanged('f-area','f-subarea','f-bed')">${_areaOpts()}</select>
-      </div>
-      <div class="fg">
-        <label>Subárea</label>
-        <select id="f-subarea" onchange="window._foodSubareaChanged('f-area','f-subarea','f-bed')">
-          <option value="">— Seleccioná el área primero —</option>
-        </select>
-      </div>
-      <div class="fg">
-        <label>Cama</label>
-        <select id="f-bed"><option value="">— Seleccioná el área primero —</option></select>
+        <label>Camas sembradas</label>
+        <div class="doc-note" style="margin-bottom:.45rem;">Todas las camas seleccionadas pertenecerán al mismo lote y recibirán un único Lot ID.</div>
+        <div id="planting-bed-rows" style="margin-top:.4rem;"></div>
+        <button type="button" onclick="addPlantingBedRow()" class="add-row-btn">+ Agregar cama</button>
       </div>
       <div class="fg">
         <label>Cultivo</label>
@@ -746,15 +774,13 @@ const FORMS = {
       <div class="fg"><label>Fecha objetivo de establecimiento</label>
         <div class="doc-note" style="margin-bottom:.35rem;">Se propone 21 días después de la siembra. Ajustala si este cultivo requiere más o menos tiempo.</div>
         <input type="date" id="f-establishment-due"></div>
-      <div class="fg"><label>Ubicación dentro de la cama <span style="font-weight:normal;color:var(--tm);">(opcional)</span></label>
-        <input type="text" id="f-location-note" placeholder="Ej.: primera mitad de la cama, dos filas lado norte"></div>
+      <div class="fg"><label>Ubicación dentro de las camas <span style="font-weight:normal;color:var(--tm);">(opcional)</span></label>
+        <input type="text" id="f-location-note" placeholder="Ej.: Cama 1: primera mitad; Cama 2: segunda mitad"></div>
       ${_workersField()}
       <div class="fg"><label>Observaciones</label>${_aw('obs', 'Observaciones o dicta nota de voz...')}</div>
       ${photoUploadWidget('food-photos')}`,
     afterRender: () => {
-      // Load all beds initially (no area filter)
-      const bedSel = document.getElementById('f-bed');
-      if (bedSel) bedSel.innerHTML = _bedOptsByArea('');
+      addPlantingBedRow();
       window._foodMaterialUnit();
       window._foodSetEstablishmentDue();
     },
@@ -987,6 +1013,7 @@ export async function openFoodForm(type, record = null, task = null) {
   _inputRows   = [];
   _availRows   = [];
   _prepBedRows = [];
+  _plantingBedRows = [];
   _applyBedRows = [];
   _maintBedRows = [];
   _harvestRows = [];
@@ -1226,8 +1253,18 @@ function _prefillFoodForm(type, record) {
 
   switch (type) {
     case 'siembra': {
-      const bed = beds.find(b => b.id === record.bed_id);
-      _prefillAreaCascade('f-area', 'f-subarea', 'f-bed', bed?.area_id || '', bed?.subarea_id || '', record.bed_id);
+      const linkedBeds = (record.planting_beds || [])
+        .map(link => {
+          const bed = link.beds || beds.find(item => item.id === link.bed_id);
+          return bed ? { area_id: bed.area_id || '', subarea_id: bed.subarea_id || '', bed_id: link.bed_id } : null;
+        })
+        .filter(Boolean);
+      if (!linkedBeds.length) {
+        const bed = beds.find(item => item.id === record.bed_id);
+        linkedBeds.push({ area_id: bed?.area_id || '', subarea_id: bed?.subarea_id || '', bed_id: record.bed_id });
+      }
+      _plantingBedRows = linkedBeds;
+      _renderPlantingBedRows();
       _setVal('f-crop', record.crop_id);
       _setVal('f-material', record.material_type || '');
       window._foodMaterialUnit();
@@ -1337,11 +1374,11 @@ export async function submitFoodForm() {
     switch (_activeForm) {
 
       case 'siembra': {
-        const area_id  = document.getElementById('f-area')?.value;
-        const bed_id   = document.getElementById('f-bed')?.value;
+        const bed_ids  = [...new Set(_plantingBedRows.map(row => row.bed_id).filter(Boolean))];
+        const bed_id   = bed_ids[0];
         const material = document.getElementById('f-material')?.value;
         const density  = document.getElementById('f-density')?.value?.trim();
-        if (!bed_id) throw new Error('Seleccioná la cama.');
+        if (!bed_id) throw new Error('Agregá al menos una cama.');
 
         let crop_id = document.getElementById('f-crop')?.value;
         if (crop_id === '__new__') {
@@ -1359,7 +1396,7 @@ export async function submitFoodForm() {
         if (density && !/^\d+(\.\d+)?$/.test(density)) throw new Error('La cantidad solo puede contener números.');
 
         const plantingFields = {
-          date, bed_id, crop_id,
+          date, bed_id, bed_ids, crop_id,
           material_type: material || null,
           quantity_density: density ? parseFloat(density) : null,
           establishment_due_date: document.getElementById('f-establishment-due')?.value || null,
@@ -1370,12 +1407,14 @@ export async function submitFoodForm() {
 
         if (_editing) {
           await _api(`/api/food/plantings/${_editing.id}`, 'PATCH', plantingFields);
+          _activeLotsByBed.clear();
           okEl.style.display = 'block';
           btn.textContent = 'Guardado ✓';
         } else {
           const created = await _api('/api/food/plantings', 'POST', {
             ...plantingFields, performed_by: userId, created_by: userId,
           });
+          _activeLotsByBed.clear();
           okEl.style.display = 'block';
           await _finalizeFoodTask(extractRecordId(created), '✅ Siembra registrada. El ID de lote fue generado automáticamente.');
           btn.textContent = 'Guardado ✓';
@@ -1571,6 +1610,7 @@ export async function submitFoodForm() {
     _inputRows   = [];
     _availRows   = [];
     _prepBedRows = [];
+    _plantingBedRows = [];
     _applyBedRows = [];
 
   } catch (e) {
@@ -1691,6 +1731,17 @@ window._foodApplyScopeAreaChanged = () => {
   _applyBedRows = [];
   _renderApplyBedRows();
   window._foodRefreshApplyLots();
+};
+
+window._flb = (i, key, value) => {
+  const row = _plantingBedRows[i];
+  if (!row) return;
+  row[key] = value;
+  if (key === 'area_id') {
+    row.subarea_id = '';
+    row.bed_id = '';
+  }
+  if (key === 'subarea_id') row.bed_id = '';
 };
 
 // Area select changed in mantenimiento → repopulate subarea, then refresh bed rows
